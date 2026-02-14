@@ -179,10 +179,36 @@ function(copy_dlls target_name)
     # so we replace semicolons with a special placeholder or ensure they are quoted)
     # But Cmakes set("a;b") works fine.
     
-    set(OPENCV_DEBUG_STR "${OPENCV_DLLS_DEBUG}")
-    set(OPENCV_RELEASE_STR "${OPENCV_DLLS_RELEASE}")
-    set(QT_ALL_STR "${QT_DLLS_ALL}")
-    set(QT_PLUGINS_DIR_STR "${QT_PLUGINS_DIR}")
+    # 1. OpenCV DLLs definition
+    set(OPENCV_BIN "${TEST_DEPS_DIR}/opencv/bin")
+    set(OPENCV_DEBUG_STR 
+        "${OPENCV_BIN}/opencv_core480d.dll"
+        "${OPENCV_BIN}/opencv_imgproc480d.dll"
+        "${OPENCV_BIN}/opencv_imgcodecs480d.dll"
+    )
+    set(OPENCV_RELEASE_STR 
+        "${OPENCV_BIN}/opencv_core480.dll"
+        "${OPENCV_BIN}/opencv_imgproc480.dll"
+        "${OPENCV_BIN}/opencv_imgcodecs480.dll"
+    )
+
+    # 2. Qt DLLs definition
+    if(Qt6_FOUND)
+         get_target_property(QT_CORE_DLL Qt6::Core LOCATION)
+         get_target_property(QT_GUI_DLL Qt6::Gui LOCATION)
+         get_target_property(QT_WIDGETS_DLL Qt6::Widgets LOCATION)
+         set(QT_ALL_STR 
+            "${QT_CORE_DLL}"
+            "${QT_GUI_DLL}"
+            "${QT_WIDGETS_DLL}"
+         )
+         # Plugins (platforms) - Derive from Core location
+         get_target_property(QT_CORE_LOC Qt6::Core LOCATION)
+         get_filename_component(QT_BIN_DIR "${QT_CORE_LOC}" DIRECTORY)
+         set(QT_PLUGINS_DIR_STR "${QT_BIN_DIR}/../plugins")
+    elseif(Qt5_FOUND)
+        # Qt5 logic if needed, similar to above
+    endif()
 
     if(DEFINED ENV{HALCONROOT})
         file(TO_CMAKE_PATH "$ENV{HALCONROOT}/bin/x64-win64" HALCON_BIN_DIR_STR)
@@ -215,8 +241,8 @@ function(copy_dlls target_name)
             endif()
         endforeach()
         
-        if(EXISTS \"${QT_PLUGINS_DIR_STR}/platforms/qwindows.dll\")
-            file(COPY \"${QT_PLUGINS_DIR_STR}/platforms/qwindows.dll\" DESTINATION \"\${TARGET_DIR}/platforms\")
+        if(EXISTS \"\${QT_PLUGINS_DIR_STR}/platforms/qwindows.dll\")
+            file(COPY \"\${QT_PLUGINS_DIR_STR}/platforms/qwindows.dll\" DESTINATION \"\${TARGET_DIR}/platforms\")
         endif()
 
         # 3. Halcon

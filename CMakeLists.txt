@@ -179,7 +179,9 @@ endif()
 install(DIRECTORY include/ DESTINATION include)
 
 # --- 添加测试子目录 ---
-if(EXISTS "${CMAKE_SOURCE_DIR}/test")
+option(AXPLUG_BUILD_TESTS "Build AxPlug tests" ON)
+
+if(AXPLUG_BUILD_TESTS AND EXISTS "${CMAKE_SOURCE_DIR}/test")
     add_subdirectory(test)
 endif()
 

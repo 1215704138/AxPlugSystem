@@ -15,6 +15,7 @@ AxPlug 是一个现代化的工业级 C++17 插件框架，支持动态加载 DL
 - **[框架对比报告](framework_comparison.md)**：AxPlug v3 vs z3y_plugin_framework 详细对比。
 - **[ImageUnifyService 开发手册](docs/ImageUnifyService_Dev.md)**：核心图像服务插件的详细设计与优化说明。
 - **[发布与集成指南](docs/Release_Guide.md)**：包含 SDK 生成、目录结构及开发者集成说明。
+- **[CMake 构建选项说明](docs/build_options.md)**：包含如何开启/关闭测试编译等构建参数说明。
 
 
 ## 🚀 快速构建

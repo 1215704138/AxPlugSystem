@@ -2,7 +2,7 @@
 setlocal
 
 echo ========================================
-echo AxPlug DEBUG Build ^& Publish
+echo AxPlug DEBUG Build (NO Tests)
 echo ========================================
 
 set PROJECT_ROOT=%~dp0..
@@ -10,8 +10,8 @@ set BUILD_DIR=%PROJECT_ROOT%\build
 set PUBLISH_DIR=%PROJECT_ROOT%\publish
 
 echo.
-echo [1/3] Configuring...
-cmake -S "%PROJECT_ROOT%" -B "%BUILD_DIR%"
+echo [1/3] Configuring (Tests OFF)...
+cmake -S "%PROJECT_ROOT%" -B "%BUILD_DIR%" -DAXPLUG_BUILD_TESTS=OFF
 if %errorlevel% neq 0 (
     echo [ERROR] CMake configuration failed.
     pause
@@ -38,8 +38,8 @@ if %errorlevel% neq 0 (
 
 echo.
 echo ========================================
-echo [SUCCESS] DEBUG Build and Publish Complete!
-echo Artifacts are in: %PUBLISH_DIR%
+echo [SUCCESS] DEBUG Build (NO Tests) Complete!
+echo Artifacts: %PUBLISH_DIR%
 echo ========================================
 echo.
 pause

@@ -8,8 +8,14 @@
 
 使用项目提供的自动化脚本生成 SDK：
 
-- **Debug 版本**: `scripts\build_publish_debug.bat` -> 输出到 `publish/`
-- **Release 版本**: `scripts\build_publish_release.bat` -> 输出到 `publish/`
+- **Debug 版本**:
+    - `scripts\build_debug_with_test.bat` (包含测试)
+    - `scripts\build_debug_no_test.bat` (纯净版 SDK)
+- **Release 版本**:
+    - `scripts\build_release_with_test.bat` (包含测试)
+    - `scripts\build_release_no_test.bat` (纯净版 SDK)
+
+> **注意**: 旧版 `build_publish_*.bat` 脚本功能已包含在 `_no_test` 版本中。
 
 生成的 `publish` 目录即为 **SDK 包**。
 
@@ -36,10 +42,18 @@ AxPlug_SDK/ (即 publish 目录)
 
 外部开发者如果要开发新的插件，或在自己的程序中宿主 AxPlug，请遵循以下步骤。
 
-### 2.1 环境要求
-
-- C++17 编译器
+- C++17 编译器 (强烈推荐 MSVC 19.3x / VS2022)
 - CMake 3.15+
+
+> [!WARNING]
+> **测试环境兼容性提示**
+> 本项目当前配置仅适配以下特定环境：
+> - **Visual Studio 2022 (MSVC)**
+> - **Halcon 20.11**
+> 
+> 如果您使用其他版本的编译器或 Halcon：
+> 1.  需自行重新配置 `CMakeLists.txt` 中的 Halcon 路径。
+> 2.  **OpenCV** 依赖可能需要重新编译以匹配您的编译器版本。
 
 ### 2.2 CMake 集成示例
 

@@ -1,0 +1,114 @@
+# Build directories
+build/
+bin/
+lib/
+out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.make
+*.cmake
+
+# Visual Studio files
+*.vcxproj*
+*.sln
+*.vcxproj.filters
+*.user
+*.suo
+*.opensdf
+*.sdf
+*.vcxproj.user
+
+# Compiled object files
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.pdb
+*.ilk
+*.exp
+*.tlog
+*.lastbuildstate
+
+# Qt specific
+*.pro.user*
+*.pri.user*
+*.qbs.user*
+*.moc
+*.moc.cpp
+*.qrc.cpp
+*_ui_*.h
+*.qmlc
+*.jsc
+
+# Qt Creator
+*.pro.user*
+*.qbs.user*
+*.qmlproject.user*
+*.cmake.user*
+
+# Qt translations
+*.ts
+*.qm
+
+# OpenCV
+*.opencv*
+
+# IDE files (except .vscode which we want to track)
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# VS Code specific files to ignore, but keep the directory
+.vscode/*.log
+.vscode/settings.json.local
+.vscode/launch.json.local
+.vscode/tasks.json.local
+
+# Logs
+*.log
+logs/
+
+# Dependencies (if they are built locally)
+deps/build/
+deps/src/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+
+# Test outputs
+test_results/
+coverage/
+*.gcda
+*.gcno
+*.lcov
+
+# Package files
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# OS generated files
+.DS_Store?
+ehthumbs.db
+Icon?
+Thumbs.db
+
+# Configuration files that may contain local paths
+*.config.local
+*.settings.local

@@ -1,0 +1,13 @@
+EXPORTS
+    Ax_Init
+    Ax_LoadPlugins
+    Ax_CreateObject
+    Ax_GetSingleton
+    Ax_ReleaseSingleton
+    Ax_ReleaseObject
+    Ax_GetPluginCount
+    Ax_GetPluginInterfaceName
+    Ax_GetPluginFileName
+    Ax_GetPluginType
+    Ax_IsPluginLoaded
+

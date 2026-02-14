@@ -1,6 +1,6 @@
-# AxPlug 插件框架 · 开发与维护手册
+# AxPlug v3 插件框架 · 开发与维护手册
 
-本文档面向框架本身的开发者和维护者，描述 AxPlug 的内部架构、源码结构、构建系统和扩展方法。
+本文档面向框架本身的开发者和维护者，描述 AxPlug v3 的内部架构、源码结构、构建系统和扩展方法。
 
 ---
 
@@ -18,6 +18,7 @@
 10. [跨平台支持](#10-跨平台支持)
 11. [调试与排障](#11-调试与排障)
 12. [扩展框架的注意事项](#12-扩展框架的注意事项)
+13. [v3 新增特性](#13-v3-新增特性)
 
 ---
 
@@ -28,8 +29,10 @@ AxPlug/
 ├── include/                         公共头文件（对外暴露）
 │   ├── AxPlug/
 │   │   ├── AxPlug.h                 用户唯一入口头文件（inline 模板 API）
-│   │   ├── IAxObject.h              基类 + AX_INTERFACE 宏
+│   │   ├── IAxObject.h              基类 + AX_INTERFACE 宏 + FNV-1a typeId + AxPtr<T>
 │   │   ├── AxPluginExport.h         导出宏 AX_EXPORT_TOOL / AX_EXPORT_SERVICE
+│   │   ├── AxProfiler.h             [v3] 内置性能分析器（Chrome trace.json）
+│   │   ├── AxException.h            [v3] 跨模块异常处理 + 线程局部错误存储
 │   │   └── OSUtils.hpp              跨平台动态库工具（header-only）
 │   ├── business/                    业务接口
 │   ├── core/                        核心服务接口
@@ -73,6 +76,7 @@ AxCore.dll 是框架的唯一运行时组件，负责：
 
 ```
 AxCoreDll.def:
+    # Core API (向后兼容)
     Ax_Init                  初始化（设置 DLL 搜索路径）
     Ax_LoadPlugins           扫描目录加载插件
     Ax_CreateObject          按接口名创建新实例（Tool）
@@ -84,6 +88,16 @@ AxCoreDll.def:
     Ax_GetPluginFileName     查询插件文件名
     Ax_GetPluginType         查询插件类型（Tool=0, Service=1）
     Ax_IsPluginLoaded        查询插件是否加载成功
+    # v3: TypeId Fast Path API
+    Ax_CreateObjectById      按 typeId 创建新实例（O(1) 热路径）
+    Ax_GetSingletonById      按 typeId+服务名获取/创建单例（O(1) 热路径）
+    Ax_ReleaseSingletonById  按 typeId 释放命名单例
+    # v3: Profiler API
+    Ax_ProfilerBeginSession  启动性能分析会话
+    Ax_ProfilerEndSession    结束分析会话并输出 trace.json
+    # v3: Error Handling API
+    Ax_GetLastError          获取线程局部错误消息
+    Ax_ClearLastError        清除线程局部错误
 ```
 
 这些 C 函数是 AxCore.dll 的全部 ABI 表面。用户侧的 `AxPlug::` 命名空间 API 是 `AxPlug.h` 中的 inline 模板，编译进调用方，通过上述 C 函数与 AxCore.dll 通信。
@@ -96,11 +110,16 @@ AxCoreDll.def:
 
 ```cpp
 class AxPluginManager {
-    std::map<std::string, int> registry_;          // interfaceName → 模块索引
-    std::vector<PluginModule> modules_;             // 所有已加载模块
-    std::map<std::pair<std::string, std::string>,
-             IAxObject*> singletonCache_;           // (接口名, 服务名) → 单例
-    mutable std::recursive_mutex mutex_;            // 全局锁
+    // v3: typeId (uint64_t FNV-1a) 替代 string 键，O(1) 哈希查找
+    std::unordered_map<uint64_t, int> registry_;                    // typeId → 扁平索引
+    std::unordered_map<std::string, uint64_t> nameToTypeId_;        // 接口名 → typeId (兼容层)
+    std::vector<PluginModule> modules_;                             // 所有已加载模块
+    std::vector<PluginEntry> allPlugins_;                           // 扁平插件列表
+    // v3: shared_ptr 管理 Service 生命周期（RAII 自动释放）
+    std::unordered_map<uint64_t, std::shared_ptr<IAxObject>> defaultSingletons_;  // 默认单例
+    std::map<std::pair<uint64_t, std::string>, std::shared_ptr<IAxObject>> namedSingletons_;  // 命名单例
+    // v3: shared_mutex 读写锁（替代 recursive_mutex 全局大锁）
+    mutable std::shared_mutex mutex_;
 };
 ```
 
@@ -210,14 +229,26 @@ AxPlug::Init(dir)
 
 ## 5. 对象生命周期管理
 
-### 5.1 Tool
+### 5.1 Tool（智能指针模式，v3 推荐）
 
 ```
 CreateTool<T>()
-  → Ax_CreateObject(T::ax_interface_name)
-  → AxPluginManager::CreateObject()
-  → pluginInfo.createFunc()       ← 在插件 DLL 中 new 对象
-  → 返回 IAxObject* → static_cast<T*>
+  → Ax_CreateObjectById(T::ax_type_id)     ← typeId O(1) 快速查找
+  → AxPluginManager::CreateObjectById()
+  → pluginInfo.createFunc()                ← 在插件 DLL 中 new 对象
+  → 包装为 AxPtr<T> (shared_ptr + 自定义 deleter)
+  → 返回 AxPtr<T>
+
+// 自动释放（RAII）：AxPtr 离开作用域时自动调用 deleter → Ax_ReleaseObject → Destroy()
+// 显式释放：AxPlug::DestroyTool(axptr) → ptr.reset() → 触发 deleter
+```
+
+### 5.2 Tool（原始指针模式，向后兼容）
+
+```
+CreateToolRaw<T>()
+  → Ax_CreateObjectById(T::ax_type_id)
+  → 返回 T* 原始指针
   
 DestroyTool(ptr)
   → Ax_ReleaseObject(ptr)
@@ -226,26 +257,27 @@ DestroyTool(ptr)
 
 **关键**：对象在插件 DLL 中 `new`，也在插件 DLL 中 `delete`，避免跨模块堆操作。
 
-### 5.2 Service
+### 5.3 Service
 
 ```
 GetService<T>(name)
-  → Ax_GetSingleton(interfaceName, name)
-  → AxPluginManager::GetSingleton()
-  → 查找 singletonCache_[(interfaceName, name)]
-  → 命中则直接返回
-  → 未命中则 CreateObject() + 缓存
+  → Ax_GetSingletonById(T::ax_type_id, name)   ← typeId O(1) 快速查找
+  → AxPluginManager::GetSingletonById()
+  → [Fast Path] shared_lock 查找 defaultSingletons_/namedSingletons_
+  → 命中则直接返回 shared_ptr.get()
+  → [Slow Path] unique_lock 双检锁创建
+  → CreateObjectByIdInternal() + 包装为 shared_ptr (自定义 deleter 调用 Destroy())
+  → 存入缓存
 
 ReleaseService<T>(name)
-  → Ax_ReleaseSingleton(interfaceName, name)
-  → AxPluginManager::ReleaseSingleton()
-  → 查找缓存 → obj->Destroy() → 移除缓存条目
+  → Ax_ReleaseSingletonById(T::ax_type_id, name)
+  → unique_lock → erase 缓存条目 → shared_ptr 析构 → Destroy()
 ```
 
-### 5.3 框架退出时
+### 5.4 框架退出时
 
 `AxPluginManager` 析构函数按以下顺序清理：
-1. 销毁所有缓存的 Service 单例（`obj->Destroy()`）
+1. 清空 `defaultSingletons_` 和 `namedSingletons_`（shared_ptr 析构自动调用 `Destroy()`）
 2. 逆序卸载所有插件 DLL（`OSUtils::UnloadLibrary`）
 3. 清空注册表和模块列表
 
@@ -253,10 +285,13 @@ ReleaseService<T>(name)
 
 ## 6. 线程安全机制
 
-- `AxPluginManager` 使用 `std::recursive_mutex` 保护所有公共方法
-- 递归锁是因为 `GetSingleton` 内部调用 `CreateObject`，需要可重入
-- 插件加载在 `Init()` 阶段一次性完成，后续主要是读操作
+- **v3**: `AxPluginManager` 使用 `std::shared_mutex` 读写锁（替代 v2 的 `recursive_mutex` 全局大锁）
+- **读操作**（`GetSingleton` 命中缓存、`GetPluginCount` 等）使用 `std::shared_lock`，多线程可并发读
+- **写操作**（`LoadOnePlugin`、首次创建 Service、`ReleaseSingleton`）使用 `std::unique_lock`
+- **双检锁**（Double-Check Locking）：`GetSingletonById` 先 shared_lock 检查，未命中再 unique_lock 创建，避免不必要的写锁
+- 插件加载在 `Init()` 阶段一次性完成，后续主要是读操作（shared_lock 零竞争）
 - 各插件自身的线程安全由插件实现者负责
+- 所有 C API 入口自动包裹 `AxExceptionGuard`，异常不会跨 DLL 传播
 
 ---
 
@@ -586,4 +621,44 @@ for (int i = 0; i < AxPlug::GetPluginCount(); i++) {
 
 ---
 
-*AxPlug · 开发与维护手册 · 2026年2月*
+## 13. v3 新增特性
+
+### 13.1 智能指针 (AxPtr)
+
+- `AxPtr<T>` 是 `std::shared_ptr<T>` 的类型别名
+- `AxPlug::CreateTool<T>()` 返回 `AxPtr<T>`，自定义 deleter 调用 `Ax_ReleaseObject`
+- RAII 自动释放，引用计数可查 (`use_count()`)
+- 可通过 `AxPlug::DestroyTool(axptr)` 显式重置
+- 向后兼容：`AxPlug::CreateToolRaw<T>()` 返回原始指针
+
+### 13.2 TypeId 热路径
+
+- `AX_INTERFACE(IMath)` 宏同时生成 `ax_interface_name` (string) 和 `ax_type_id` (uint64_t FNV-1a)
+- 注册表使用 `std::unordered_map<uint64_t, int>`，O(1) 查找
+- Service/Tool API 内部均使用 typeId 快速路径
+- `nameToTypeId_` 兼容层支持旧的字符串 API
+
+### 13.3 内置 Profiler
+
+- `AxProfiler` 生成 Chrome trace format (trace.json)
+- RAII 宏：`AX_PROFILE_SCOPE("name")` / `AX_PROFILE_FUNCTION()`
+- `AxPlug::ProfilerBegin()` / `AxPlug::ProfilerEnd()` 控制会话
+- 编译期开关：`#define AX_PROFILE_ENABLED 0` 禁用
+- 在 `chrome://tracing` 中打开 trace.json 可视化
+
+### 13.4 异常处理
+
+- `AxExceptionGuard` 包裹所有 C API 入口，自动 try/catch
+- `AxErrorState` 线程局部存储：错误码 + 错误消息 + 来源
+- `AxPlug::GetLastError()` / `AxPlug::HasError()` / `AxPlug::ClearLastError()`
+- 预定义错误码：`AxErrorCode::PluginNotFound`, `PluginNotLoaded`, `FactoryFailed` 等
+
+### 13.5 shared_mutex 读写锁
+
+- 替代 v2 的 `std::recursive_mutex` 全局大锁
+- 读多写少场景（如渲染循环中频繁获取 Service）无锁竞争
+- 双检锁模式确保 Service 首次创建的线程安全
+
+---
+
+*AxPlug v3 · 开发与维护手册 · 2026年2月*

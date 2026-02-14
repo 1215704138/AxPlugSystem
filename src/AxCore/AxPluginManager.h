@@ -2,10 +2,13 @@
 
 #include "AxPlug/IAxObject.h"
 #include "AxPlug/AxPluginExport.h"
+#include "AxPlug/AxException.h"
 #include <string>
+#include <unordered_map>
 #include <map>
 #include <vector>
-#include <mutex>
+#include <shared_mutex>
+#include <memory>
 
 // Internal plugin module info (one per DLL)
 struct PluginModule {
@@ -26,6 +29,7 @@ struct PluginEntry {
 };
 
 // Plugin manager - singleton, manages all plugin loading and lifecycle
+// v3: shared_mutex (read-write lock), typeId-based hot path, shared_ptr cache, exception handling
 class AxPluginManager {
 public:
     static AxPluginManager* Instance();
@@ -36,14 +40,23 @@ public:
     // Load all plugin DLLs from directory
     void LoadPlugins(const char* directory);
 
-    // Tool: create new instance each time
+    // Tool: create new instance each time (string-based, backward compat)
     IAxObject* CreateObject(const char* interfaceName);
 
-    // Service: get or create named singleton
+    // Tool: create new instance (typeId-based, fast path)
+    IAxObject* CreateObjectById(uint64_t typeId);
+
+    // Service: get or create named singleton (string-based, backward compat)
     IAxObject* GetSingleton(const char* interfaceName, const char* serviceName);
 
-    // Release named singleton
+    // Service: get or create named singleton (typeId-based, fast path)
+    IAxObject* GetSingletonById(uint64_t typeId, const char* serviceName);
+
+    // Release named singleton (string-based)
     void ReleaseSingleton(const char* interfaceName, const char* serviceName);
+
+    // Release named singleton (typeId-based)
+    void ReleaseSingletonById(uint64_t typeId, const char* serviceName);
 
     // Release object (call Destroy)
     void ReleaseObject(IAxObject* obj);
@@ -55,6 +68,10 @@ public:
     int GetPluginType(int index) const;
     bool IsPluginLoaded(int index) const;
 
+    // Error query
+    const char* GetLastError() const;
+    void ClearLastError();
+
 private:
     AxPluginManager();
     ~AxPluginManager();
@@ -63,8 +80,14 @@ private:
 
     void LoadOnePlugin(const std::string& path);
 
-    // Plugin registry: interfaceName -> flat plugin index
-    std::map<std::string, int> registry_;
+    // Internal: create object by typeId (caller must hold at least shared_lock)
+    IAxObject* CreateObjectByIdInternal(uint64_t typeId);
+
+    // Plugin registry: typeId -> flat plugin index (O(1) lookup)
+    std::unordered_map<uint64_t, int> registry_;
+
+    // String-to-typeId fallback map (for backward compat string-based API)
+    std::unordered_map<std::string, uint64_t> nameToTypeId_;
 
     // All loaded modules (one per DLL)
     std::vector<PluginModule> modules_;
@@ -72,8 +95,12 @@ private:
     // Flat plugin list for query API
     std::vector<PluginEntry> allPlugins_;
 
-    // Service singleton cache: (interfaceName, serviceName) -> IAxObject*
-    std::map<std::pair<std::string, std::string>, IAxObject*> singletonCache_;
+    // Service singleton cache: typeId -> shared_ptr (default/unnamed singletons, hot path)
+    std::unordered_map<uint64_t, std::shared_ptr<IAxObject>> defaultSingletons_;
 
-    mutable std::recursive_mutex mutex_;
+    // Named service singleton cache: (typeId, name) -> shared_ptr
+    std::map<std::pair<uint64_t, std::string>, std::shared_ptr<IAxObject>> namedSingletons_;
+
+    // Read-write lock: shared_lock for reads, unique_lock for writes
+    mutable std::shared_mutex mutex_;
 };

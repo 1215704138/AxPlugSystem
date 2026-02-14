@@ -1,4 +1,4 @@
-# AxPlug 插件框架 · 使用手册
+# AxPlug v3 插件框架 · 使用手册
 
 ## 目录
 
@@ -15,22 +15,27 @@
 11. [核心服务 — 图像统一](#11-核心服务--图像统一)
 12. [驱动插件 — TCP / UDP](#12-驱动插件--tcp--udp)
 13. [构建与部署](#13-构建与部署)
-14. [常见问题](#14-常见问题)
+14. [v3 新特性 — 智能指针 / Profiler / 异常处理 / 并发](#14-v3-新特性)
+15. [常见问题](#15-常见问题)
 
 ---
 
 ## 1. 框架简介
 
-AxPlug 是一个轻量级 C++ 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。
+AxPlug 是一个现代化的工业级 C++17 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。
 
 **核心特性：**
 
 - 用户侧只需 `#include "AxPlug/AxPlug.h"` 一个头文件
 - 基于 C++ 接口类型自动匹配，无需手写字符串 ID
-- 编译期字符串字面量作为类型键，保证跨 DLL 一致
+- 编译期字符串字面量 + FNV-1a typeId 作为类型键，保证跨 DLL 一致
 - Tool（多实例）和 Service（命名单例）两种插件模型
 - 插件 DLL 放在 exe 同目录即可自动发现
 - **一个 DLL 可导出多个插件**，声明式宏，完全向后兼容
+- **[v3] 智能指针** (`AxPtr<T>` / `shared_ptr`) 自动引用计数 + 手动 `DestroyTool` 双模式
+- **[v3] 内置 Profiler** 生成 Chrome trace.json，`AX_PROFILE_SCOPE` 宏
+- **[v3] 跨模块异常保护** `AxExceptionGuard` + 线程局部错误存储
+- **[v3] 高性能并发** `shared_mutex` 读写锁 + typeId O(1) 热路径
 
 ---
 
@@ -40,7 +45,8 @@ AxPlug 是一个轻量级 C++ 插件框架，支持动态加载 DLL 插件并通
 
 | 类型 | 生命周期 | 实例数 | 获取方式 | 释放方式 |
 |------|----------|--------|----------|----------|
-| **Tool** | 用户管理 | 多实例 | `CreateTool<T>()` | `DestroyTool(ptr)` |
+| **Tool** (智能指针) | RAII 自动 | 多实例 | `CreateTool<T>()` → `AxPtr<T>` | 作用域结束自动释放 / `DestroyTool(axptr)` |
+| **Tool** (原始指针) | 用户管理 | 多实例 | `CreateToolRaw<T>()` → `T*` | `DestroyTool(ptr)` |
 | **Service** | 框架托管 | 命名单例 | `GetService<T>(name)` | `ReleaseService<T>(name)` |
 
 ### 2.2 接口基类
@@ -100,11 +106,17 @@ int main() {
     auto* logger = AxPlug::GetService<ILoggerService>("main");
     logger->Info("程序启动");
 
-    // 使用 Tool
-    auto* math = AxPlug::CreateTool<IMath>();
-    int result = math->Add(10, 20);
-    logger->InfoFormat("10 + 20 = %d", result);
-    AxPlug::DestroyTool(math);
+    // v3: 使用智能指针 Tool（RAII 自动释放）
+    {
+        auto math = AxPlug::CreateTool<IMath>();  // 返回 AxPtr<IMath>
+        int result = math->Add(10, 20);
+        logger->InfoFormat("10 + 20 = %d", result);
+    } // math 自动释放，无需手动 DestroyTool
+
+    // 向后兼容: 原始指针 Tool（手动释放）
+    auto* math2 = AxPlug::CreateToolRaw<IMath>();
+    math2->Sub(30, 10);
+    AxPlug::DestroyTool(math2);
 
     // 释放服务
     AxPlug::ReleaseService<ILoggerService>("main");
@@ -139,27 +151,50 @@ cmake --install . --config Debug --prefix ../publish
 
 ## 4. 使用 Tool（工具插件）
 
-Tool 是多实例插件，每次调用 `CreateTool` 都创建独立的新对象，用户负责释放。
+Tool 是多实例插件，每次调用 `CreateTool` 都创建独立的新对象。
+
+### 4.1 智能指针模式（v3 推荐）
 
 ```cpp
-// 创建
-auto* math = AxPlug::CreateTool<IMath>();
+// 创建 - 返回 AxPtr<T> (shared_ptr)
+auto math = AxPlug::CreateTool<IMath>();
 
 // 使用
 int sum = math->Add(10, 20);
 
-// 销毁
+// 引用计数
+AxPtr<IMath> copy = math;  // use_count = 2
+copy.reset();              // use_count = 1
+
+// 自动释放：离开作用域时 shared_ptr 析构 → Destroy()
+// 或显式释放：
+AxPlug::DestroyTool(math); // math 变为 nullptr
+```
+
+### 4.2 原始指针模式（向后兼容）
+
+```cpp
+// 创建
+auto* math = AxPlug::CreateToolRaw<IMath>();
+
+// 使用
+int sum = math->Add(10, 20);
+
+// 必须手动销毁
 AxPlug::DestroyTool(math);
 ```
 
 可同时创建多个独立实例：
 
 ```cpp
-auto* m1 = AxPlug::CreateTool<IMath>();
-auto* m2 = AxPlug::CreateTool<IMath>();
-// m1 != m2，各自独立
-AxPlug::DestroyTool(m1);
-AxPlug::DestroyTool(m2);
+// 智能指针版本 - 容器管理，自动释放
+{
+    std::vector<AxPtr<IMath>> tools;
+    for (int i = 0; i < 5; i++) {
+        tools.push_back(AxPlug::CreateTool<IMath>());
+    }
+    // 使用 tools...
+} // 全部自动释放
 ```
 
 ---
@@ -532,16 +567,93 @@ AxPlug/
 
 ---
 
-## 14. 常见问题
+## 14. v3 新特性
+
+### 14.1 智能指针 (AxPtr)
+
+```cpp
+// 自动引用计数 - 无需手动 DestroyTool
+{
+    AxPtr<IMath> math = AxPlug::CreateTool<IMath>();
+    AxPtr<IMath> copy = math;              // use_count = 2
+    std::cout << math.use_count();         // 输出 2
+    copy.reset();                          // use_count = 1
+} // 自动调用 Destroy()
+
+// 显式释放
+AxPtr<IMath> math = AxPlug::CreateTool<IMath>();
+AxPlug::DestroyTool(math);  // math 变为 nullptr
+```
+
+### 14.2 内置 Profiler
+
+```cpp
+// 启动分析会话
+AxPlug::ProfilerBegin("MyApp", "trace.json");
+
+// 在函数中使用 RAII 宏自动记录耗时
+void MyFunction() {
+    AX_PROFILE_FUNCTION();  // 自动记录函数名和耗时
+    // ... 业务代码 ...
+}
+
+void MyLoop() {
+    AX_PROFILE_SCOPE("MainLoop");  // 自定义名称
+    // ... 循环逻辑 ...
+}
+
+// 结束会话，输出 trace.json
+AxPlug::ProfilerEnd();
+// 在 chrome://tracing 中打开 trace.json 可视化
+```
+
+### 14.3 异常处理
+
+```cpp
+// 所有 API 调用自动包裹异常保护
+auto* obj = AxPlug::CreateToolRaw<IMath>();
+if (!obj) {
+    // 检查错误
+    if (AxPlug::HasError()) {
+        const char* err = AxPlug::GetLastError();
+        printf("错误: %s\n", err);
+    }
+    AxPlug::ClearLastError();
+}
+```
+
+### 14.4 多线程并发
+
+```cpp
+// v3 使用 shared_mutex 读写锁，多线程安全
+// 读操作（GetService 命中缓存）并发无锁竞争
+std::vector<std::thread> threads;
+for (int i = 0; i < 8; i++) {
+    threads.emplace_back([&]() {
+        // 并发获取 Service - 安全
+        auto* logger = AxPlug::GetService<ILoggerService>();
+        // 并发创建 Tool - 安全
+        auto math = AxPlug::CreateTool<IMath>();
+        math->Add(1, 2);
+    });
+}
+for (auto& t : threads) t.join();
+```
+
+---
+
+## 15. 常见问题
 
 | 现象 | 解决方案 |
 |------|----------|
-| `CreateTool` 返回 nullptr | 检查插件 DLL 是否在 exe 目录，接口是否有 `AX_INTERFACE` 宏 |
+| `CreateTool` 返回 nullptr | 检查插件 DLL 是否在 exe 目录，接口是否有 `AX_INTERFACE` 宏。检查 `AxPlug::GetLastError()` |
 | 链接错误：找不到 `Ax_*` 函数 | CMake 中添加 `target_link_libraries(... AxCore)` |
 | Service 返回旧实例 | 先 `ReleaseService<T>(name)` 再重新 `GetService` |
 | DLL 加载失败 | 确保所有模块使用相同的 MSVC 运行时 (MD/MDd) |
 | 接口匹配失败 | 确认接口头文件中有 `AX_INTERFACE(类名)` 宏 |
+| 多线程崩溃 | v3 已使用 shared_mutex，框架 API 线程安全。检查插件自身是否线程安全 |
+| Profiler 无输出 | 确认调用了 `AxPlug::ProfilerBegin()` 和 `AxPlug::ProfilerEnd()` |
 
 ---
 
-*AxPlug · 使用手册 · 2026年2月*
+*AxPlug v3 · 使用手册 · 2026年2月*

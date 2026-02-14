@@ -42,6 +42,7 @@ endif()
 # 🔧 设置标准运行时库 (确保跨DLL调用兼容性)
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    add_compile_definitions(NOMINMAX)
 endif()
 
 # 抑制 MSVC STL 扩展警告

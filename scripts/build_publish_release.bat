@@ -11,7 +11,7 @@ set PUBLISH_DIR=%PROJECT_ROOT%\publish
 
 echo.
 echo [1/3] Configuring...
-cmake -S "%PROJECT_ROOT%" -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A x64
+cmake -S "%PROJECT_ROOT%" -B "%BUILD_DIR%"
 if %errorlevel% neq 0 (
     echo [ERROR] CMake configuration failed.
     pause

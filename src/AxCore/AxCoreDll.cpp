@@ -1,4 +1,5 @@
 #include "AxPluginManager.h"
+#include "AxPlug/AxProfiler.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -15,8 +16,10 @@
     #endif
 #endif
 
-// AxCore v2 - C export functions
+// AxCore v3 - C export functions
 extern "C" {
+
+    // ========== Core API (backward compat) ==========
 
     AX_CORE_API void Ax_Init(const char* pluginDir) {
         AxPluginManager::Instance()->Init(pluginDir);
@@ -60,6 +63,40 @@ extern "C" {
 
     AX_CORE_API bool Ax_IsPluginLoaded(int index) {
         return AxPluginManager::Instance()->IsPluginLoaded(index);
+    }
+
+    // ========== v3: TypeId Fast Path API ==========
+
+    AX_CORE_API IAxObject* Ax_CreateObjectById(uint64_t typeId) {
+        return AxPluginManager::Instance()->CreateObjectById(typeId);
+    }
+
+    AX_CORE_API IAxObject* Ax_GetSingletonById(uint64_t typeId, const char* serviceName) {
+        return AxPluginManager::Instance()->GetSingletonById(typeId, serviceName);
+    }
+
+    AX_CORE_API void Ax_ReleaseSingletonById(uint64_t typeId, const char* serviceName) {
+        AxPluginManager::Instance()->ReleaseSingletonById(typeId, serviceName);
+    }
+
+    // ========== v3: Profiler API ==========
+
+    AX_CORE_API void Ax_ProfilerBeginSession(const char* name, const char* filepath) {
+        AxProfiler::Instance().BeginSession(name, filepath);
+    }
+
+    AX_CORE_API void Ax_ProfilerEndSession() {
+        AxProfiler::Instance().EndSession();
+    }
+
+    // ========== v3: Error Handling API ==========
+
+    AX_CORE_API const char* Ax_GetLastError() {
+        return AxPluginManager::Instance()->GetLastError();
+    }
+
+    AX_CORE_API void Ax_ClearLastError() {
+        AxPluginManager::Instance()->ClearLastError();
     }
 
 } // extern "C"

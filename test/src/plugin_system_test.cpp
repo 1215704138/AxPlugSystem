@@ -1,241 +1,214 @@
-#include <iostream>
-#include <windows.h>
-#include <vector>
 #include <chrono>
+#include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
+#include <windows.h>
+
 
 // v2: 只需引入 AxPlug.h 和接口头文件
 #include "AxPlug/AxPlug.h"
 #include "business/IMath.h"
 #include "core/LoggerService.h"
-#include "driver/ITcpClient.h"
-#include "driver/ITcpServer.h"
-#include "driver/IUdpSocket.h"
 
-void testPluginSystemInfo() {
-    std::cout << "\n=== 插件系统信息查询 ===" << std::endl;
-    
-    int pluginCount = AxPlug::GetPluginCount();
-    std::cout << "已加载插件数量: " << pluginCount << std::endl;
-    
-    if (pluginCount == 0) {
-        std::cout << "没有找到任何插件" << std::endl;
-        return;
-    }
-    
-    for (int i = 0; i < pluginCount; i++) {
-        auto info = AxPlug::GetPluginInfo(i);
-        std::cout << "\n插件 " << i << ":" << std::endl;
-        std::cout << "  文件名: " << (info.fileName ? info.fileName : "N/A") << std::endl;
-        std::cout << "  接口: " << (info.interfaceName ? info.interfaceName : "N/A") << std::endl;
-        std::cout << "  类型: " << (info.isTool ? "Tool" : "Service") << std::endl;
-        std::cout << "  已加载: " << (info.isLoaded ? "是" : "否") << std::endl;
-    }
+// 辅助函数：打印插件信息
+void printPluginInfo(int index) {
+  auto info = AxPlug::GetPluginInfo(index);
+  if (info.isLoaded) {
+    std::cout << "插件 [" << index << "]:" << std::endl;
+    std::cout << "  文件名: " << (info.fileName ? info.fileName : "N/A")
+              << std::endl;
+    std::cout << "  接口名: "
+              << (info.interfaceName ? info.interfaceName : "N/A") << std::endl;
+    std::cout << "  类型: " << (info.isTool ? "Tool" : "Service") << std::endl;
+    std::cout << "  已加载: " << (info.isLoaded ? "是" : "否") << std::endl;
+  }
 }
 
-void testMathPlugin() {
-    std::cout << "\n=== 数学插件测试 ===" << std::endl;
-    
-    // 创建数学工具实例
-    auto* math = AxPlug::CreateTool<IMath>();
+void testSmartPointerTool() {
+  std::cout << "\n=== [2] 智能指针 Tool 测试 (AxPtr / shared_ptr) ==="
+            << std::endl;
+  AX_PROFILE_SCOPE("testSmartPointerTool");
+
+  // 使用智能指针创建 Tool - 自动引用计数，作用域结束自动释放
+  {
+    auto math = AxPlug::CreateTool<IMath>();
     if (!math) {
-        std::cout << "MathPlugin 创建失败" << std::endl;
-        return;
+      std::cout << "MathPlugin 创建失败" << std::endl;
+      return;
     }
-    
-    std::cout << "MathPlugin 创建成功" << std::endl;
-    
+
+    std::cout << "MathPlugin 智能指针创建成功 (use_count=" << math.use_count()
+              << ")" << std::endl;
+
     // 测试基本运算
     int a = 100, b = 25;
-    int sum = math->Add(a, b);
-    int diff = math->Sub(a, b);
-    
-    std::cout << "数学运算测试:" << std::endl;
-    std::cout << "  " << a << " + " << b << " = " << sum << std::endl;
-    std::cout << "  " << a << " - " << b << " = " << diff << std::endl;
-    
-    // 验证结果
-    bool correct = (sum == 125) && (diff == 75);
-    std::cout << "结果验证: " << (correct ? "正确" : "错误") << std::endl;
-    
-    // 手动销毁
+    std::cout << "  " << a << " + " << b << " = " << math->Add(a, b)
+              << std::endl;
+    std::cout << "  " << a << " - " << b << " = " << math->Sub(a, b)
+              << std::endl;
+
+    // 测试引用计数 - 复制 shared_ptr
+    auto mathCopy = math;
+    std::cout << "复制后 use_count=" << math.use_count() << std::endl;
+
+    // mathCopy 离开作用域时 use_count 减少
+    mathCopy.reset();
+    std::cout << "reset 后 use_count=" << math.use_count() << std::endl;
+
+    // 测试显式 DestroyTool (shared_ptr 版本)
     AxPlug::DestroyTool(math);
-    std::cout << "MathPlugin 已通过 DestroyTool 销毁" << std::endl;
+    std::cout << "DestroyTool 后 math 是否为空: "
+              << (math == nullptr ? "是" : "否") << std::endl;
+  }
+  // 作用域结束，如果还有引用会自动释放
+  std::cout << "智能指针 Tool 测试通过 (RAII 自动释放)" << std::endl;
 }
 
-void testLoggerService() {
-    std::cout << "\n=== 日志服务测试 ===" << std::endl;
-    
-    // 测试命名服务
-    auto* logger1 = AxPlug::GetService<ILoggerService>("main");
-    auto* logger2 = AxPlug::GetService<ILoggerService>("debug");
-    
-    if (!logger1 || !logger2) {
-        std::cout << "LoggerService 创建失败" << std::endl;
-        return;
-    }
-    
-    std::cout << "LoggerService 创建成功" << std::endl;
-    std::cout << "主日志服务地址: " << logger1 << std::endl;
-    std::cout << "调试日志服务地址: " << logger2 << std::endl;
-    std::cout << "是否为不同实例: " << (logger1 != logger2 ? "是" : "否") << std::endl;
-    
-    // 测试日志功能
-    logger1->SetLevel(LogLevel::Info);
-    logger1->EnableConsoleOutput(true);
-    logger1->Info("这是主日志服务的消息");
-    
-    logger2->SetLevel(LogLevel::Debug);
-    logger2->EnableConsoleOutput(true);
-    logger2->Debug("这是调试日志服务的消息");
-    
-    // 释放服务
-    AxPlug::ReleaseService<ILoggerService>("main");
-    AxPlug::ReleaseService<ILoggerService>("debug");
-    std::cout << "LoggerService 已释放" << std::endl;
+void testRawPointerTool() {
+  std::cout << "\n=== [3] 原始指针 Tool 测试 (CreateToolRaw) ===" << std::endl;
+  AX_PROFILE_SCOPE("testRawPointerTool");
+
+  // 使用原始指针创建 Tool - 需要手动释放
+  auto *math = AxPlug::CreateToolRaw<IMath>();
+  if (!math) {
+    std::cout << "MathPlugin (Raw) 创建失败" << std::endl;
+    return;
+  }
+
+  std::cout << "MathPlugin 原始指针创建成功" << std::endl;
+
+  // 测试基本运算
+  int a = 50, b = 10;
+  std::cout << "  " << a << " + " << b << " = " << math->Add(a, b) << std::endl;
+
+  // 必须显式释放
+  AxPlug::DestroyTool(math);
+  std::cout << "原始指针 Tool 已释放" << std::endl;
 }
 
-void testNetworkPlugins() {
-    std::cout << "\n=== 网络插件测试 ===" << std::endl;
-    
-    // 测试 TCP 客户端
-    auto* tcpClient = AxPlug::CreateTool<ITcpClient>();
-    if (tcpClient) {
-        std::cout << "TCP客户端创建成功" << std::endl;
-        std::cout << "超时设置: " << tcpClient->GetTimeout() << " ms" << std::endl;
-        tcpClient->SetTimeout(3000);
-        std::cout << "超时设置已更新: " << tcpClient->GetTimeout() << " ms" << std::endl;
-        AxPlug::DestroyTool(tcpClient);
-        std::cout << "TCP客户端已销毁" << std::endl;
-    }
-    
-    // 测试 TCP 服务器
-    auto* tcpServer = AxPlug::CreateTool<ITcpServer>();
-    if (tcpServer) {
-        std::cout << "TCP服务器创建成功" << std::endl;
-        std::cout << "最大连接数: " << tcpServer->GetMaxConnections() << std::endl;
-        tcpServer->SetMaxConnections(20);
-        std::cout << "最大连接数已更新: " << tcpServer->GetMaxConnections() << std::endl;
-        AxPlug::DestroyTool(tcpServer);
-        std::cout << "TCP服务器已销毁" << std::endl;
-    }
-    
-    // 测试 UDP 套接字
-    auto* udpSocket = AxPlug::CreateTool<IUdpSocket>();
-    if (udpSocket) {
-        std::cout << "UDP套接字创建成功" << std::endl;
-        std::cout << "缓冲区大小: " << udpSocket->GetBufferSize() << " bytes" << std::endl;
-        udpSocket->SetBufferSize(8192);
-        std::cout << "缓冲区大小已更新: " << udpSocket->GetBufferSize() << " bytes" << std::endl;
-        AxPlug::DestroyTool(udpSocket);
-        std::cout << "UDP套接字已销毁" << std::endl;
-    }
-}
+void testService() {
+  std::cout << "\n=== [4] Service 单例测试 ===" << std::endl;
+  AX_PROFILE_SCOPE("testService");
 
-void testMemoryManagement() {
-    std::cout << "\n=== 内存管理测试 ===" << std::endl;
-    
-    // 创建多个不同类型的实例
-    std::vector<IMath*> mathTools;
-    std::vector<ITcpClient*> tcpClients;
-    
-    for (int i = 0; i < 3; i++) {
-        auto* math = AxPlug::CreateTool<IMath>();
-        if (math) {
-            mathTools.push_back(math);
-            std::cout << "创建数学工具实例 " << i + 1 << std::endl;
-        }
-        
-        auto* client = AxPlug::CreateTool<ITcpClient>();
-        if (client) {
-            tcpClients.push_back(client);
-            std::cout << "创建TCP客户端实例 " << i + 1 << std::endl;
-        }
-    }
-    
-    // 使用工具
-    for (size_t i = 0; i < mathTools.size(); i++) {
-        int result = mathTools[i]->Add((int)(i * 10), (int)(i * 5));
-        std::cout << "数学工具 " << i + 1 << " 计算: " << (i * 10) << " + " << (i * 5) << " = " << result << std::endl;
-    }
-    
-    // 统一销毁
-    std::cout << "\n统一销毁所有实例..." << std::endl;
-    for (auto& tool : mathTools) {
-        AxPlug::DestroyTool(tool);
-        tool = nullptr;
-    }
-    mathTools.clear();
-    
-    for (auto& client : tcpClients) {
-        AxPlug::DestroyTool(client);
-        client = nullptr;
-    }
-    tcpClients.clear();
-    
-    std::cout << "所有实例已销毁" << std::endl;
+  // 获取 Service 单例 (全局唯一)
+  // 第一次调用会自动创建
+  auto *logger = AxPlug::GetService<ILoggerService>();
+  if (!logger) {
+    std::cout << "LoggerPlugin Service 获取失败" << std::endl;
+    return;
+  }
+
+  std::cout << "LoggerPlugin Service 获取成功" << std::endl;
+
+  // 使用 Service
+  logger->Log(LogLevel::Info, "This is a log message from Plugin System Test");
+  logger->Log(LogLevel::Warn, "This is a warning message");
+  logger->Log(LogLevel::Error, "This is an error message");
+
+  // 再次获取应该返回同一个实例
+  auto *logger2 = AxPlug::GetService<ILoggerService>();
+  std::cout << "单例一致性检查: " << (logger == logger2 ? "通过" : "失败")
+            << std::endl;
+
+  // Service 不需要手动释放，由 PluginManager 管理
+  // 但可以显式释放
+  AxPlug::ReleaseService<ILoggerService>();
+  std::cout << "Service 已显式释放" << std::endl;
 }
 
 void testPerformance() {
-    std::cout << "\n=== 性能测试 ===" << std::endl;
-    
-    const int iterations = 1000;
-    std::cout << "执行 " << iterations << " 次插件创建和销毁操作..." << std::endl;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    for (int i = 0; i < iterations; i++) {
-        auto* math = AxPlug::CreateTool<IMath>();
-        if (math) {
-            volatile int result = math->Add(i, i + 1);
-            (void)result;
-            AxPlug::DestroyTool(math);
-        }
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "性能测试完成" << std::endl;
-    std::cout << "总耗时: " << duration.count() << " ms" << std::endl;
-    std::cout << "平均每次操作: " << static_cast<double>(duration.count()) / iterations << " ms" << std::endl;
+  std::cout << "\n=== [5] 性能基准测试 (Hot Path) ===" << std::endl;
+  AX_PROFILE_SCOPE("testPerformance");
+
+  // 预热
+  {
+    auto warmUp = AxPlug::CreateTool<IMath>();
+  }
+
+  const int iterations = 1000000; // 100万次调用
+  std::cout << "开始性能测试 (" << iterations << " 次 Create/Destroy Tool)..."
+            << std::endl;
+
+  auto start = std::chrono::high_resolution_clock::now();
+
+  for (int i = 0; i < iterations; ++i) {
+    // 每次创建和销毁，测试 Hot Path (TypeId 哈希查找) 性能
+    auto math = AxPlug::CreateTool<IMath>();
+    // math 自动销毁
+  }
+
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+  std::cout << "测试完成!" << std::endl;
+  std::cout << "总耗时: " << duration.count() << " ms" << std::endl;
+
+  // 防止除以零
+  long long count = duration.count();
+  double throughput = 0.0;
+  if (count > 0) {
+    throughput = (double)iterations * 1000.0 / count;
+  } else {
+    throughput = (double)iterations * 1000.0; // 如果耗时为0，则吞吐量极大
+  }
+
+  std::cout << "吞吐量: " << throughput << " ops/sec" << std::endl;
+  std::cout << "平均耗时: " << (double)duration.count() * 1000.0 / iterations
+            << " us/op" << std::endl;
+}
+
+void testPluginSystemInfo() {
+  std::cout << "\n=== [1] 插件系统信息 ===" << std::endl;
+  int count = AxPlug::GetPluginCount();
+  std::cout << "已加载插件数量: " << count << std::endl;
+
+  for (int i = 0; i < count; ++i) {
+    printPluginInfo(i);
+  }
 }
 
 int main() {
-    SetConsoleOutputCP(65001);
-    SetConsoleCP(65001);
-    
-    std::cout << "=== AxPlug v2 完整插件系统测试 ===" << std::endl;
-    
-    try {
-        // 初始化插件系统
-        std::cout << "\n初始化插件系统..." << std::endl;
-        AxPlug::Init();
-        std::cout << "插件系统初始化完成" << std::endl;
-        
-        // 执行测试
-        testPluginSystemInfo();
-        testMathPlugin();
-        testLoggerService();
-        testNetworkPlugins();
-        testMemoryManagement();
-        testPerformance();
-        
-    } catch (const std::exception& e) {
-        std::cerr << "异常: " << e.what() << std::endl;
-        return 1;
-    }
-    
-    std::cout << "\n=== 测试总结 ===" << std::endl;
-    std::cout << "  插件系统初始化 - OK" << std::endl;
-    std::cout << "  插件信息查询 - OK" << std::endl;
-    std::cout << "  数学插件功能 - OK" << std::endl;
-    std::cout << "  日志服务功能 - OK" << std::endl;
-    std::cout << "  网络插件功能 - OK" << std::endl;
-    std::cout << "  内存管理 - OK" << std::endl;
-    std::cout << "  性能测试 - OK" << std::endl;
-    
-    std::cout << "\n🎉 AxPlug v2 完整测试成功！" << std::endl;
-    return 0;
+  // 设置控制台编码为UTF-8 (Windows)
+  SetConsoleOutputCP(65001);
+  SetConsoleCP(65001);
+
+  std::cout << "=== AxPlug 插件系统集成测试 ===" << std::endl;
+
+  // 1. 初始化插件系统 (加载插件)
+  // 如果不传参数，自动查找当前目录或 exe 目录
+  {
+    AX_PROFILE_SCOPE("AxPlug::Init");
+    AxPlug::Init();
+  }
+
+  if (AxPlug::HasError()) {
+    std::cout << "初始化错误: " << AxPlug::GetLastError() << std::endl;
+    AxPlug::ClearLastError();
+  }
+
+  // 开始 Profiler 会话
+  AxPlug::ProfilerBegin("AxPlugTestInfo", "plugin_test_trace.json");
+
+  // 2. 打印插件信息
+  testPluginSystemInfo();
+
+  // 3. 测试智能指针 Tool
+  testSmartPointerTool();
+
+  // 4. 测试原始指针 Tool
+  testRawPointerTool();
+
+  // 5. 测试 Service
+  testService();
+
+  // 6. 性能测试
+  testPerformance();
+
+  // 结束 Profiler 会话
+  AxPlug::ProfilerEnd();
+
+  std::cout << "\n=== 测试全部完成 ===" << std::endl;
+  return 0;
 }

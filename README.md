@@ -1,11 +1,18 @@
-# AxPlug 插件框架
+# AxPlug v3 插件框架
 
-AxPlug 是一个基于 C++17 的高性能、轻量级插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。
+AxPlug 是一个现代化的工业级 C++17 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。
+
+**v3 核心升级：**
+- **智能指针** (`AxPtr<T>` / `shared_ptr`) 自动引用计数 + 手动 `DestroyTool` 双模式
+- **内置 Profiler** 生成 Chrome trace.json，RAII 宏 `AX_PROFILE_SCOPE`
+- **跨模块异常保护** `AxExceptionGuard` + 线程局部错误存储
+- **高性能并发** `shared_mutex` 读写锁 + typeId FNV-1a O(1) 热路径
 
 ## 📚 文档索引
 
 - **[快速入门 & 使用手册](docs/AxPlug.md)**：适合使用者，包含框架简介、核心概念、快速上手指南。
 - **[开发与维护手册](docs/AxPlug_Dev.md)**：适合框架开发者，包含内部架构、源码结构、构建系统详解。
+- **[框架对比报告](framework_comparison.md)**：AxPlug v3 vs z3y_plugin_framework 详细对比。
 - **[ImageUnifyService 开发手册](docs/ImageUnifyService_Dev.md)**：核心图像服务插件的详细设计与优化说明。
 - **[发布与集成指南](docs/Release_Guide.md)**：包含 SDK 生成、目录结构及开发者集成说明。
 

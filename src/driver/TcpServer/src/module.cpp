@@ -1,4 +1,9 @@
+#include "../../../include/AxPlug/AxPluginExport.h"
+#include "../include/BoostTcpServer.h"
 #include "../include/TcpServer.h"
 
-// 导出为 Tool 插件（多实例，用户管理生命周期）
-AX_EXPORT_TOOL(TcpServer, ITcpServer)
+
+AX_BEGIN_PLUGIN_MAP()
+AX_PLUGIN_TOOL(TcpServer, ITcpServer)
+AX_PLUGIN_TOOL(BoostTcpServer, ITcpServer)
+AX_END_PLUGIN_MAP()

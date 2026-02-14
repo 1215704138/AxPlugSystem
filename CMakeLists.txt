@@ -177,4 +177,9 @@ endif()
 # 安装头文件
 install(DIRECTORY include/ DESTINATION include)
 
+# --- 添加测试子目录 ---
+if(EXISTS "${CMAKE_SOURCE_DIR}/test")
+    add_subdirectory(test)
+endif()
+
 

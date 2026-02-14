@@ -5,15 +5,28 @@ set(PUBLISH_DIR "${CMAKE_SOURCE_DIR}/publish")
 set(PUBLISH_INCLUDE_DIR "${PUBLISH_DIR}/include")
 set(PUBLISH_LIB_DIR "${PUBLISH_DIR}/lib")
 
-if(NOT EXISTS "${PUBLISH_DIR}/bin/AxCore.dll")
-    message(STATUS "[Test] Publish folder not found. Skipping test targets.")
-    message(STATUS "[Test] Please run 'scripts/build_publish.bat' to generate SDK first.")
-    return()
+# 检查是否作为子项目构建 (即 AxCore 目标是否存在)
+if(TARGET AxCore)
+    message(STATUS "[Test] Building as part of main project. Using AxCore target directly.")
+    set(AX_CORE_LIB AxCore)
+    set(PUBLISH_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
+    # 不需要 link_directories，因为 target_link_libraries 会自动处理
+else()
+    # 独立构建模式 (原逻辑)
+    if(NOT EXISTS "${PUBLISH_DIR}/bin/AxCore.dll")
+        message(STATUS "[Test] Publish folder not found. Skipping test targets.")
+        message(STATUS "[Test] Please run 'scripts/build_publish.bat' to generate SDK first.")
+        return()
+    endif()
+    
+    set(AX_CORE_LIB AxCore)
+    include_directories("${PUBLISH_INCLUDE_DIR}")
+    link_directories("${PUBLISH_LIB_DIR}")
 endif()
 
 # 包含路径和库路径
+# 包含路径 (兼容两种模式)
 include_directories("${PUBLISH_INCLUDE_DIR}")
-link_directories("${PUBLISH_LIB_DIR}")
 
 # --- 定义依赖查找路径 (相对于 test 目录) ---
 # 注意：OpenCV/Halcon 等第三方依赖仍然在 test/deps 下
@@ -25,21 +38,22 @@ set(TEST_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
 # --- 1. 插件体系测试 ---
 add_executable(plugin_system_test src/plugin_system_test.cpp)
 # 链接到 publish/lib/AxCore.lib，而不是构建目标
-target_link_libraries(plugin_system_test PRIVATE AxCore)
+# 链接到 AxCore
+target_link_libraries(plugin_system_test PRIVATE ${AX_CORE_LIB})
 set_target_properties(plugin_system_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
 # --- 2. 网络插件测试 ---
 add_executable(network_test src/network_test.cpp)
-target_link_libraries(network_test PRIVATE AxCore)
+target_link_libraries(network_test PRIVATE ${AX_CORE_LIB})
 set_target_properties(network_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
 # --- 3. 综合日志服务测试 ---
 add_executable(logger_test src/logger_test.cpp)
-target_link_libraries(logger_test PRIVATE AxCore)
+target_link_libraries(logger_test PRIVATE ${AX_CORE_LIB})
 set_target_properties(logger_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
@@ -126,7 +140,7 @@ endif()
 
 # --- 4. 图像统一服务测试 ---
 add_executable(image_unify_test src/image_unify_test.cpp)
-target_link_libraries(image_unify_test PRIVATE AxCore)
+target_link_libraries(image_unify_test PRIVATE ${AX_CORE_LIB})
 set_target_properties(image_unify_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
@@ -156,3 +170,69 @@ else()
     message(STATUS "Halcon not found - ImageUnifyTest will run without Halcon features")
 endif()
 
+
+# --- 自动复制 DLL 到输出目录 (Script Approach) ---
+function(copy_dlls target_name)
+    set(COPY_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/copy_dlls_${target_name}.cmake")
+    
+    # 准备文件列表 (Handling lists correctly within the script generation strings is tricky, 
+    # so we replace semicolons with a special placeholder or ensure they are quoted)
+    # But Cmakes set("a;b") works fine.
+    
+    set(OPENCV_DEBUG_STR "${OPENCV_DLLS_DEBUG}")
+    set(OPENCV_RELEASE_STR "${OPENCV_DLLS_RELEASE}")
+    set(QT_ALL_STR "${QT_DLLS_ALL}")
+    set(QT_PLUGINS_DIR_STR "${QT_PLUGINS_DIR}")
+
+    if(DEFINED ENV{HALCONROOT})
+        file(TO_CMAKE_PATH "$ENV{HALCONROOT}/bin/x64-win64" HALCON_BIN_DIR_STR)
+    else()
+        set(HALCON_BIN_DIR_STR "")
+    endif()
+
+    file(WRITE "${COPY_SCRIPT}" "
+        message(STATUS \"Running post-build DLL copy for configuration: \${CONFIG}\")
+        message(STATUS \"Target directory: \${TARGET_DIR}\")
+
+        # 1. OpenCV
+        if(\"\${CONFIG}\" STREQUAL \"Debug\")
+            set(FILES \"${OPENCV_DEBUG_STR}\")
+        else()
+            set(FILES \"${OPENCV_RELEASE_STR}\")
+        endif()
+        
+        foreach(f \${FILES})
+            if(EXISTS \"\${f}\")
+                file(COPY \"\${f}\" DESTINATION \"\${TARGET_DIR}\")
+            endif()
+        endforeach()
+
+        # 2. Qt
+        set(QT_FILES \"${QT_ALL_STR}\")
+        foreach(f \${QT_FILES})
+            if(EXISTS \"\${f}\")
+                file(COPY \"\${f}\" DESTINATION \"\${TARGET_DIR}\")
+            endif()
+        endforeach()
+        
+        if(EXISTS \"${QT_PLUGINS_DIR_STR}/platforms/qwindows.dll\")
+            file(COPY \"${QT_PLUGINS_DIR_STR}/platforms/qwindows.dll\" DESTINATION \"\${TARGET_DIR}/platforms\")
+        endif()
+
+        # 3. Halcon
+        set(HALCON_DIR \"${HALCON_BIN_DIR_STR}\")
+        if(HALCON_DIR AND EXISTS \"\${HALCON_DIR}/halcon.dll\")
+            file(COPY \"\${HALCON_DIR}/halcon.dll\" DESTINATION \"\${TARGET_DIR}\")
+            if(EXISTS \"\${HALCON_DIR}/halconcpp.dll\")
+                file(COPY \"\${HALCON_DIR}/halconcpp.dll\" DESTINATION \"\${TARGET_DIR}\")
+            endif()
+        endif()
+    ")
+
+    add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DCONFIG=$<CONFIG> -DTARGET_DIR=$<TARGET_FILE_DIR:${target_name}> -P "${COPY_SCRIPT}"
+    )
+endfunction()
+
+# 对 image_unify_test 应用复制
+copy_dlls(image_unify_test)

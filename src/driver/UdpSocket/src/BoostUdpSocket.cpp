@@ -20,7 +20,7 @@ BoostUdpSocket::BoostUdpSocket()
     , local_port_(0)
     , last_sender_port_(0)
 {
-    SetSocketOptions();
+    // Fix 3.13: Removed SetSocketOptions() — socket is not open yet
 }
 
 BoostUdpSocket::~BoostUdpSocket() {
@@ -51,11 +51,10 @@ bool BoostUdpSocket::Bind(int port) {
         // 绑定地址
         socket_->bind(endpoint);
         
-        // 更新地址信息
         UpdateAddressInfo();
         
-        // 启动异步接收
-        StartReceive();
+        // Fix 1.9a: Removed StartReceive() - no io_context driver thread exists,
+        // so async_receive_from callbacks would never fire. Sync Receive() still works.
         
         bound_.store(true);
         
@@ -377,9 +376,8 @@ void BoostUdpSocket::HandleReceive(const boost::system::error_code& ec, size_t b
         return;
     }
     
-    // 更新发送者信息
+    // Fix 1.12: Use the endpoint already filled by async_receive_from instead of overwriting with default
     std::lock_guard<std::mutex> lock(receive_mutex_);
-    last_sender_endpoint_ = boost::asio::ip::udp::endpoint();
     last_sender_address_ = last_sender_endpoint_.address().to_string();
     last_sender_port_ = last_sender_endpoint_.port();
     

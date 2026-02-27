@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 
 LoggerService::LoggerService()
@@ -57,7 +58,8 @@ LoggerService::~LoggerService() {
 
 std::string LoggerService::getCurrentTimestamp() const {
   auto now = std::time(nullptr);
-  auto tm = *std::localtime(&now);
+  struct tm tm;
+  localtime_s(&tm, &now);  // Fix 2.7: localtime_s is thread-safe (Windows)
 
   std::ostringstream oss;
   if (timestampFormat_ == "iso") {
@@ -123,9 +125,6 @@ void LoggerService::writeToConsole(const std::string &message) {
 }
 
 void LoggerService::Log(LogLevel level, const char *message) {
-  // 🔍 调试：使用printf绕过std::cout缓冲区
-  printf("--- Log Entry: %s ---\n", message ? message : "null");
-
   if (level < currentLevel_) {
     return;
   }
@@ -175,13 +174,23 @@ void LoggerService::LogFormat(LogLevel level, const char *format, ...) {
 
   va_list args;
   va_start(args, format);
+  va_list argsCopy;
+  va_copy(argsCopy, args);
 
   char buffer[1024];
-  vsnprintf(buffer, sizeof(buffer), format, args);
-
+  int ret = vsnprintf(buffer, sizeof(buffer), format, args);
   va_end(args);
 
-  Log(level, buffer);
+  // Fix 3.15: If truncated, dynamically allocate a larger buffer
+  if (ret >= static_cast<int>(sizeof(buffer))) {
+    std::vector<char> dynBuf(ret + 1);
+    vsnprintf(dynBuf.data(), dynBuf.size(), format, argsCopy);
+    va_end(argsCopy);
+    Log(level, dynBuf.data());
+  } else {
+    va_end(argsCopy);
+    if (ret > 0) Log(level, buffer);
+  }
 }
 
 void LoggerService::InfoFormat(const char *format, ...) {
@@ -204,13 +213,23 @@ void LoggerService::InfoFormat(const char *format, ...) {
 void LoggerService::ErrorFormat(const char *format, ...) {
   va_list args;
   va_start(args, format);
+  va_list argsCopy;
+  va_copy(argsCopy, args);
 
   char buffer[1024];
-  vsnprintf(buffer, sizeof(buffer), format, args);
-
+  int ret = vsnprintf(buffer, sizeof(buffer), format, args);
   va_end(args);
 
-  Error(buffer);
+  // Fix 3.15: If truncated, dynamically allocate a larger buffer
+  if (ret >= static_cast<int>(sizeof(buffer))) {
+    std::vector<char> dynBuf(ret + 1);
+    vsnprintf(dynBuf.data(), dynBuf.size(), format, argsCopy);
+    va_end(argsCopy);
+    Error(dynBuf.data());
+  } else {
+    va_end(argsCopy);
+    Error(buffer);
+  }
 }
 
 void LoggerService::SetLevel(LogLevel level) {
@@ -236,7 +255,9 @@ void LoggerService::SetLogFile(const char *filePath) {
 
 const char *LoggerService::GetLogFile() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return logFilePath_.c_str();
+  thread_local std::string snapshot;
+  snapshot = logFilePath_;
+  return snapshot.c_str();
 }
 
 void LoggerService::EnableConsoleOutput(bool enable) {
@@ -256,7 +277,9 @@ void LoggerService::SetTimestampFormat(const char *format) {
 
 const char *LoggerService::GetTimestampFormat() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return timestampFormat_.c_str();
+  thread_local std::string snapshot;
+  snapshot = timestampFormat_;
+  return snapshot.c_str();
 }
 
 void LoggerService::Flush() {
@@ -268,13 +291,12 @@ void LoggerService::Flush() {
 
 // 异步日志实现
 void LoggerService::EnableAsyncLogging(bool enable) {
+  std::lock_guard<std::mutex> asyncLock(asyncStateMutex_);  // Fix 2.1: Protect Check-Then-Act
   if (enable && !asyncEnabled_) {
-    // 启用异步日志
     asyncEnabled_ = true;
     stopFlag_ = false;
     logThread_ = std::thread(&LoggerService::asyncLogWorker, this);
   } else if (!enable && asyncEnabled_) {
-    // 禁用异步日志
     asyncEnabled_ = false;
     if (logThread_.joinable()) {
       {
@@ -284,7 +306,6 @@ void LoggerService::EnableAsyncLogging(bool enable) {
       queueCondition_.notify_all();
       logThread_.join();
     }
-
     // 处理剩余的日志消息
     std::lock_guard<std::mutex> lock(queueMutex_);
     while (!logQueue_.empty()) {
@@ -323,6 +344,7 @@ void LoggerService::asyncLogWorker() {
 }
 
 void LoggerService::processLogMessage(const LogMessage &message) {
+  std::lock_guard<std::mutex> lock(mutex_);  // Fix 2.2/2.3: Protect file I/O against concurrent SetLogFile()
   std::string formattedMessage;
   formatLogMessage(message.level, message.message, formattedMessage);
   writeToFile(formattedMessage);

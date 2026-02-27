@@ -9,11 +9,12 @@
 #include <string>
 
 class BoostTcpClient : public ITcpClient {
-    AX_INTERFACE(BoostTcpClient)
-
 public:
     BoostTcpClient();
     virtual ~BoostTcpClient();
+
+    // Accept an externally provided socket (used by BoostTcpServer::HandleAccept)
+    bool AttachSocket(boost::asio::ip::tcp::socket&& socket);
 
     // 连接管理
     bool Connect(const char* host, int port) override;
@@ -94,6 +95,7 @@ private:
     void HandleTimeout(const boost::system::error_code& ec);
     void StartReceive();
     void StopInternal();
+    void AttachUpdateState();
     
     // 高性能优化方法
     void OptimizeSocket();

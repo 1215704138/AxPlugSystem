@@ -73,8 +73,8 @@ public:
    */
   static LibraryHandle LoadLibrary(const std::string &libraryPath) {
 #ifdef _WIN32
-    std::wstring widePath;
-    widePath.assign(libraryPath.begin(), libraryPath.end());
+    // Fix 3.2: Proper UTF-8 to UTF-16 conversion via MultiByteToWideChar
+    std::wstring widePath = Utf8ToWide(libraryPath);
     HMODULE handle = ::LoadLibraryW(widePath.c_str());
     return handle;
 #else
@@ -146,9 +146,9 @@ public:
    */
   static std::string GetCurrentModulePath() {
 #ifdef _WIN32
-    wchar_t buffer[MAX_PATH];
-    DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    if (length > 0) {
+    wchar_t buffer[32768];
+    DWORD length = GetModuleFileNameW(nullptr, buffer, 32768);
+    if (length > 0 && length < 32768) {
       return WideToUtf8(std::wstring(buffer, length));
     }
 #else
@@ -189,8 +189,8 @@ public:
    */
   static bool SetLibrarySearchPath(const std::string &directory) {
 #ifdef _WIN32
-    std::wstring wideDir;
-    wideDir.assign(directory.begin(), directory.end());
+    // Fix 3.2: Proper UTF-8 to UTF-16 conversion via MultiByteToWideChar
+    std::wstring wideDir = Utf8ToWide(directory);
     return SetDllDirectoryW(wideDir.c_str()) != FALSE;
 #else
     // Linux/macOS 不需要设置特定的库搜索路径
@@ -256,6 +256,15 @@ public:
 private:
   // 平台特定的内部实现
 #ifdef _WIN32
+  static std::wstring Utf8ToWide(const std::string &utf8) {
+    if (utf8.empty())
+      return L"";
+    int size_needed = ::MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.length()), nullptr, 0);
+    std::wstring wstrTo(size_needed, 0);
+    ::MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.length()), &wstrTo[0], size_needed);
+    return wstrTo;
+  }
+
   static std::string WideToUtf8(const std::wstring &wide) {
     if (wide.empty())
       return "";

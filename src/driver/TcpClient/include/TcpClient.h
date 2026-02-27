@@ -5,6 +5,8 @@
 #include <ws2tcpip.h>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <atomic>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -18,8 +20,8 @@ protected:
 
 private:
     SOCKET socket_;
-    bool isConnected_;
-    bool isConnecting_;
+    std::atomic<bool> isConnected_;   // Fix 2.4: atomic for thread safety
+    std::atomic<bool> isConnecting_;  // Fix 2.4: atomic for thread safety
     int timeout_;
     int bufferSize_;
     bool keepAlive_;
@@ -27,6 +29,7 @@ private:
     std::string remoteAddr_;
     int localPort_;
     int remotePort_;
+    mutable std::mutex errorMutex_;  // Fix 2.9: protect lastError_/errorCode_
     mutable std::string lastError_;
     mutable int errorCode_;
     

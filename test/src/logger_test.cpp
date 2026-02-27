@@ -5,9 +5,21 @@
 #include <string>
 #include <sstream>
 #include <thread>
+#include <cstdio>
+#include <cstdarg>
 
 #include "AxPlug/AxPlug.h"
 #include "core/LoggerService.h"
+
+// Helper: format string then call logger method (replaces removed variadic interface methods)
+static std::string fmt(const char* format, ...) {
+    char buf[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    return std::string(buf);
+}
 
 // 辅助函数：将整数转换为字符串
 std::string intToString(int i) {
@@ -45,9 +57,9 @@ void testDifferentServiceNames() {
             logger->EnableConsoleOutput(false);
             std::cout << "🔧 已禁用控制台输出" << std::endl;
             
-            std::cout << "🔍 即将调用InfoFormat..." << std::endl;
-            logger->InfoFormat("服务 %s 的日志输出", serviceName);
-            std::cout << "✅ InfoFormat调用完成" << std::endl;
+            std::cout << "🔍 即将调用Info..." << std::endl;
+            logger->Info(fmt("服务 %s 的日志输出", serviceName).c_str());
+            std::cout << "✅ Info调用完成" << std::endl;
         } else {
             std::cout << "❌ 创建失败" << std::endl;
         }
@@ -174,8 +186,8 @@ void testBasicLogging() {
     
     // 测试格式化日志
     std::cout << "\n测试格式化日志:" << std::endl;
-    logger->InfoFormat("用户 %s 登录系统，年龄 %d，分数 %.2f", "张三", 25, 95.5);
-    logger->ErrorFormat("文件 %s 在第 %d 行发生错误: %s", "test.cpp", 123, "内存访问错误");
+    logger->Info(fmt("用户 %s 登录系统，年龄 %d，分数 %.2f", "张三", 25, 95.5).c_str());
+    logger->Error(fmt("文件 %s 在第 %d 行发生错误: %s", "test.cpp", 123, "内存访问错误").c_str());
     
     std::cout << "✅ 基础日志测试完成" << std::endl;
     
@@ -306,7 +318,7 @@ void testFileLogging() {
     logger->Info("这是一条测试信息日志");
     logger->Warn("这是一条测试警告日志");
     logger->Error("这是一条测试错误日志");
-    logger->InfoFormat("格式化测试: 数值=%d, 字符串=%s", 42, "测试字符串");
+    logger->Info(fmt("格式化测试: 数值=%d, 字符串=%s", 42, "测试字符串").c_str());
     logger->Info("=== 文件日志测试结束 ===");
     
     // 刷新日志到文件
@@ -336,12 +348,11 @@ void testHighVolumeLogging() {
     
     for (int i = 0; i < logCount; i++) {
         if (i % 100 == 0) {
-            logger->InfoFormat("进度: %s/%s (%.1f%%)", 
-                intToString(i).c_str(), intToString(logCount).c_str(), (i * 100.0) / logCount);
+            logger->Info(fmt("进度: %s/%s (%.1f%%)", intToString(i).c_str(), intToString(logCount).c_str(), (i * 100.0) / logCount).c_str());
         } else if (i % 50 == 0) {
-            logger->ErrorFormat("警告: 第 %s 条日志", intToString(i).c_str());
+            logger->Error(fmt("警告: 第 %s 条日志", intToString(i).c_str()).c_str());
         } else {
-            logger->LogFormat(LogLevel::Debug, "调试信息: 索引 %s", intToString(i).c_str());
+            logger->Log(LogLevel::Debug, fmt("调试信息: 索引 %s", intToString(i).c_str()).c_str());
         }
     }
     
@@ -404,7 +415,7 @@ void testMultipleCreateDestroy() {
         
         // 测试功能
         if (i % 10 == 0) {
-            logger->InfoFormat("第 %s 次创建测试", intToString(i).c_str());
+            logger->Info(fmt("第 %s 次创建测试", intToString(i).c_str()).c_str());
         }
         
         // 销毁
@@ -441,7 +452,7 @@ void testConcurrentServices() {
         if (logger) {
             loggers.push_back(logger);
             std::cout << "✅ 创建成功，地址: " << logger << std::endl;
-            logger->InfoFormat("并发服务 %s", serviceName.c_str());
+            logger->Info(fmt("并发服务 %s", serviceName.c_str()).c_str());
         } else {
             std::cout << "❌ 创建失败" << std::endl;
         }

@@ -51,6 +51,13 @@ set_target_properties(network_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# --- 2.5 命名绑定测试 (接口→多实现) ---
+add_executable(named_binding_test src/named_binding_test.cpp)
+target_link_libraries(named_binding_test PRIVATE ${AX_CORE_LIB})
+set_target_properties(named_binding_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # --- 3. 综合日志服务测试 ---
 add_executable(logger_test src/logger_test.cpp)
 target_link_libraries(logger_test PRIVATE ${AX_CORE_LIB})

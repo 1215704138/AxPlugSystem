@@ -1,22 +1,9 @@
 #include "../include/TcpServer.h"
+#include "AxPlug/WinsockInit.hpp"  // Fix 3.8: unified Winsock init
 #include <iostream>
 #include <cstring>
 
-// Winsock 初始化
-class WinsockInitializer {
-public:
-    WinsockInitializer() {
-        WSADATA wsaData;
-        int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-        if (result != 0) {
-            std::cerr << "WSAStartup failed: " << result << std::endl;
-        }
-    }
-    ~WinsockInitializer() {
-        WSACleanup();
-    }
-};
-static WinsockInitializer wsInit;
+static auto& wsInit_ = AxPlug::GetWinsockInit();
 
 // TcpClientConnection 实现
 TcpClientConnection::TcpClientConnection(SOCKET socket, TcpServer* server) 
@@ -35,27 +22,27 @@ TcpClientConnection::TcpClientConnection(SOCKET socket, TcpServer* server)
     getsockname(socket_, (sockaddr*)&localAddr, &addrLen);
     getpeername(socket_, (sockaddr*)&remoteAddr, &addrLen);
     
-    localAddr_ = inet_ntoa(localAddr.sin_addr);
+    // Fix 2.5: Use thread-safe inet_ntop instead of inet_ntoa
+    char localBuf[INET_ADDRSTRLEN], remoteBuf[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &localAddr.sin_addr, localBuf, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &remoteAddr.sin_addr, remoteBuf, INET_ADDRSTRLEN);
+    localAddr_ = localBuf;
     localPort_ = ntohs(localAddr.sin_port);
-    remoteAddr_ = inet_ntoa(remoteAddr.sin_addr);
+    remoteAddr_ = remoteBuf;
     remotePort_ = ntohs(remoteAddr.sin_port);
 }
 
 TcpClientConnection::~TcpClientConnection() {
-    std::cout << "DEBUG: Destroying TcpClientConnection " << this << std::endl;
     Disconnect();
     
     // 安全回调：通知服务器移除自身引用，避免悬挂指针
-    // 只有在服务器仍然有效时才调用回调
     if (server_) {
         try {
             server_->OnClientDisconnected(this);
         } catch (...) {
             // 如果服务器已经被销毁，忽略异常
-            std::cout << "DEBUG: Server already destroyed, skipping callback" << std::endl;
         }
     }
-    std::cout << "DEBUG: TcpClientConnection Destroyed " << this << std::endl;
 }
 
 bool TcpClientConnection::Connect(const char* host, int port) {
@@ -177,20 +164,25 @@ bool TcpClientConnection::IsKeepAliveEnabled() const {
 }
 
 const char* TcpClientConnection::GetLastError() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     return lastError_.c_str();
 }
 
 int TcpClientConnection::GetErrorCode() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     return errorCode_;
 }
 
 void TcpClientConnection::setError(const std::string& error, int code) const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     lastError_ = error;
     errorCode_ = code;
 }
 
 std::string TcpClientConnection::getAddressFromSockaddr(const sockaddr_in& addr) const {
-    return inet_ntoa(addr.sin_addr);
+    char buf[INET_ADDRSTRLEN];  // Fix 2.5: thread-safe inet_ntop
+    inet_ntop(AF_INET, &addr.sin_addr, buf, INET_ADDRSTRLEN);
+    return std::string(buf);
 }
 
 int TcpClientConnection::getPortFromSockaddr(const sockaddr_in& addr) const {
@@ -212,11 +204,9 @@ TcpServer::TcpServer()
 }
 
 TcpServer::~TcpServer() {
-    fprintf(stderr, "[TcpServer] DEBUG: Entering ~TcpServer destructor %p\n", this);
-    isDestroying_ = true;  // 设置析构标志
+    isDestroying_ = true;
     StopListening();
     DisconnectAllClients();
-    fprintf(stderr, "[TcpServer] DEBUG: TcpServer Destroyed\n");
 }
 
 bool TcpServer::createSocket() {
@@ -245,6 +235,7 @@ bool TcpServer::setSocketOptions() {
 }
 
 void TcpServer::setError(const std::string& error, int code) const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     lastError_ = error;
     errorCode_ = code;
 }
@@ -266,26 +257,29 @@ void TcpServer::OnClientDisconnected(TcpClientConnection* client) {
     auto it = std::find(clients_.begin(), clients_.end(), client);
     if (it != clients_.end()) {
         clients_.erase(it);
-        std::cout << "DEBUG: Client " << client << " removed from server list" << std::endl;
-    } else {
-        std::cout << "DEBUG: Client " << client << " not found in server list (already removed)" << std::endl;
     }
 }
 
 void TcpServer::CleanupInvalidClients() {
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    auto it = clients_.begin();
-    while (it != clients_.end()) {
-        if (*it && (*it)->IsConnected()) {
-            ++it;
-        } else {
-            // 修复：先删除对象，再移除指针
-            if (*it) {
-                (*it)->Disconnect(); // 确保Socket关闭
-                delete *it;          // 释放内存
+    std::vector<TcpClientConnection*> toDelete;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        auto it = clients_.begin();
+        while (it != clients_.end()) {
+            if (*it && (*it)->IsConnected()) {
+                ++it;
+            } else {
+                if (*it) {
+                    toDelete.push_back(*it);
+                }
+                it = clients_.erase(it);
             }
-            it = clients_.erase(it);
         }
+    }
+    for (auto* client : toDelete) {
+        client->server_ = nullptr;
+        client->Disconnect();
+        delete client;
     }
 }
 
@@ -398,29 +392,37 @@ ITcpClient* TcpServer::GetClient(int index) {
 }
 
 bool TcpServer::DisconnectClient(ITcpClient* client) {
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    auto it = std::find(clients_.begin(), clients_.end(), 
-                      static_cast<TcpClientConnection*>(client));
-    if (it != clients_.end()) {
-        (*it)->Disconnect();
-        delete *it;
-        clients_.erase(it);
+    TcpClientConnection* toDelete = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        auto it = std::find(clients_.begin(), clients_.end(), static_cast<TcpClientConnection*>(client));
+        if (it != clients_.end()) {
+            toDelete = *it;
+            clients_.erase(it);
+        }
+    }
+    if (toDelete) {
+        toDelete->server_ = nullptr;
+        toDelete->Disconnect();
+        delete toDelete;
         return true;
     }
     return false;
 }
 
 bool TcpServer::DisconnectAllClients() {
-    fprintf(stderr, "[TcpServer] DEBUG: DisconnectAllClients called\n");
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    for (auto* client : clients_) {
+    std::vector<TcpClientConnection*> toDelete;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        toDelete.swap(clients_);
+    }
+    for (auto* client : toDelete) {
         if (client) {
+            client->server_ = nullptr;
             client->Disconnect();
             delete client;
         }
     }
-    clients_.clear();
-    fprintf(stderr, "[TcpServer] DEBUG: DisconnectAllClients completed\n");
     return true;
 }
 
@@ -475,10 +477,12 @@ bool TcpServer::IsReuseAddressEnabled() const {
 }
 
 const char* TcpServer::GetLastError() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     return lastError_.c_str();
 }
 
 int TcpServer::GetErrorCode() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     return errorCode_;
 }
 

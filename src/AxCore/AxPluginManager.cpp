@@ -24,14 +24,13 @@ AxPluginManager::~AxPluginManager() {
   // deleter)
   defaultSingletons_.clear();
   namedSingletons_.clear();
+  namedImplRegistry_.clear();
 
-  // Unload all plugin DLLs
-  for (auto it = modules_.rbegin(); it != modules_.rend(); ++it) {
-    if (it->handle) {
-      AxPlug::OSUtils::UnloadLibrary(
-          static_cast<AxPlug::LibraryHandle>(it->handle));
-    }
-  }
+  // Fix 1.4: DLLs are intentionally NOT unloaded here.
+  // Tool objects created via CreateObject may still be alive with raw pointers
+  // into DLL code. Calling FreeLibrary would crash their virtual destructors.
+  // OS reclaims DLL memory on process exit. For explicit unload, add a
+  // Shutdown() API with object-count tracking in a future phase.
   modules_.clear();
   registry_.clear();
   nameToTypeId_.clear();
@@ -62,9 +61,20 @@ void AxPluginManager::LoadPlugins(const char *directory) {
   if (!fs::exists(directory, ec))
     return;
 
+  // Re-entry protection: skip if this directory was already scanned
+  std::string normalizedDir = fs::absolute(fs::u8path(directory), ec).u8string();
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    for (const auto &d : scannedDirs_) {
+      if (d == normalizedDir) return;
+    }
+    scannedDirs_.push_back(normalizedDir);
+  }
+
   std::string ext = AxPlug::OSUtils::GetLibraryExtension();
 
-  for (const auto &entry : fs::recursive_directory_iterator(directory, ec)) {
+  // Fix 3.1: Use non-recursive iterator to prevent DLL hijack from nested subdirs
+  for (const auto &entry : fs::directory_iterator(directory, ec)) {
     if (entry.is_regular_file() && entry.path().extension() == ext) {
       std::string filename = entry.path().filename().u8string();
       // Skip AxCore.dll itself
@@ -77,9 +87,7 @@ void AxPluginManager::LoadPlugins(const char *directory) {
 }
 
 void AxPluginManager::LoadOnePlugin(const std::string &path) {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-
-  // Normalize path and check for duplicates
+  // Fix 2.11: Phase 1 — Normalize path outside lock (no shared state access)
   std::error_code ec;
   fs::path fsPath = fs::u8path(path);
   fs::path absFsPath = fs::absolute(fsPath, ec);
@@ -90,77 +98,99 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
   std::string checkPath = AxPlug::OSUtils::NormalizePath(finalPath);
 
 #ifdef _WIN32
-  std::transform(
-      checkPath.begin(), checkPath.end(), checkPath.begin(),
-      [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
+  std::transform(checkPath.begin(), checkPath.end(), checkPath.begin(), [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
 #endif
 
-  // Check if already loaded
-  for (const auto &mod : modules_) {
-    std::string existingCheck = AxPlug::OSUtils::NormalizePath(mod.filePath);
+  // Fix 2.11: Phase 2 — Check duplicates under shared_lock (read-only)
+  {
+    std::shared_lock<std::shared_mutex> rlock(mutex_);
+    for (const auto &mod : modules_) {
+      std::string existingCheck = AxPlug::OSUtils::NormalizePath(mod.filePath);
 #ifdef _WIN32
-    std::transform(
-        existingCheck.begin(), existingCheck.end(), existingCheck.begin(),
-        [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
+      std::transform(existingCheck.begin(), existingCheck.end(), existingCheck.begin(), [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
 #endif
-    if (existingCheck == checkPath)
-      return;
+      if (existingCheck == checkPath)
+        return;
+    }
   }
 
+  // Fix 2.11: Phase 3 — Load DLL outside lock (expensive I/O, no longer blocks readers)
   PluginModule mod;
   mod.filePath = finalPath;
   mod.fileName = absFsPath.filename().u8string();
 
-  // Load DLL
   auto handle = AxPlug::OSUtils::LoadLibrary(finalPath);
   if (!handle) {
     mod.errorMessage = AxPlug::OSUtils::GetLastError();
+    std::unique_lock<std::shared_mutex> wlock(mutex_);
     modules_.push_back(mod);
     return;
   }
 
   mod.handle = handle;
 
-  // Helper lambda: register a plugin into both registries
-  auto registerPlugin = [&](const AxPluginInfo &info, int moduleIndex,
-                            int pluginIndex) {
-    if (!info.interfaceName)
-      return;
-    int flatIndex = static_cast<int>(allPlugins_.size());
-    allPlugins_.push_back({moduleIndex, pluginIndex});
-    registry_[info.typeId] = flatIndex;
-    nameToTypeId_[info.interfaceName] = info.typeId;
-  };
+  // Resolve entry points outside lock
+  auto multiFunc = (GetAxPluginsFunc)AxPlug::OSUtils::GetSymbol(handle, AX_PLUGINS_ENTRY_POINT);
+  auto singleFunc = (GetAxPluginFunc)AxPlug::OSUtils::GetSymbol(handle, AX_PLUGIN_ENTRY_POINT);
 
-  // Try multi-plugin entry point first (GetAxPlugins)
-  auto multiFunc = (GetAxPluginsFunc)AxPlug::OSUtils::GetSymbol(
-      handle, AX_PLUGINS_ENTRY_POINT);
+  int pluginCount = 0;
+  const AxPluginInfo *plugins = nullptr;
   if (multiFunc) {
-    int pluginCount = 0;
-    const AxPluginInfo *plugins = multiFunc(&pluginCount);
-    if (plugins && pluginCount > 0) {
-      for (int i = 0; i < pluginCount; i++) {
-        mod.plugins.push_back(plugins[i]);
-      }
-      mod.isLoaded = true;
-      mod.errorMessage = "OK";
+    plugins = multiFunc(&pluginCount);
+  }
 
-      int moduleIndex = static_cast<int>(modules_.size());
-      for (int i = 0; i < pluginCount; i++) {
-        registerPlugin(mod.plugins[i], moduleIndex, i);
-      }
-      modules_.push_back(std::move(mod));
+  // Fix 2.11: Phase 4 — Register under unique_lock (write path)
+  std::unique_lock<std::shared_mutex> wlock(mutex_);
+
+  // Re-check duplicates (TOCTOU protection: another thread may have loaded same DLL)
+  for (const auto &existingMod : modules_) {
+    std::string existingCheck = AxPlug::OSUtils::NormalizePath(existingMod.filePath);
+#ifdef _WIN32
+    std::transform(existingCheck.begin(), existingCheck.end(), existingCheck.begin(), [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
+#endif
+    if (existingCheck == checkPath) {
+      AxPlug::OSUtils::UnloadLibrary(handle);
       return;
     }
   }
 
-  // Fallback: single-plugin entry point (GetAxPlugin)
-  auto singleFunc = (GetAxPluginFunc)AxPlug::OSUtils::GetSymbol(
-      handle, AX_PLUGIN_ENTRY_POINT);
+  // Helper lambda: register a plugin into registries (supports named impl bindings)
+  auto registerPlugin = [&](const AxPluginInfo &info, int moduleIndex, int pluginIndex) {
+    if (!info.interfaceName)
+      return;
+    std::string implName = (info.implName && info.implName[0] != '\0') ? info.implName : "";
+    int flatIndex = static_cast<int>(allPlugins_.size());
+    // Named impl registry: (typeId, implName) -> flatIndex
+    auto namedKey = std::make_pair(info.typeId, implName);
+    auto [nit, nInserted] = namedImplRegistry_.insert({namedKey, flatIndex});
+    if (!nInserted) {
+      // Duplicate (typeId, implName) pair — skip
+      return;
+    }
+    allPlugins_.push_back({moduleIndex, pluginIndex});
+    // Default registry: first registered impl for a typeId becomes the default
+    registry_.insert({info.typeId, flatIndex});
+    nameToTypeId_[info.interfaceName] = info.typeId;
+  };
+
+  if (plugins && pluginCount > 0) {
+    for (int i = 0; i < pluginCount; i++) {
+      mod.plugins.push_back(plugins[i]);
+    }
+    mod.isLoaded = true;
+    mod.errorMessage = "OK";
+    int moduleIndex = static_cast<int>(modules_.size());
+    for (int i = 0; i < pluginCount; i++) {
+      registerPlugin(mod.plugins[i], moduleIndex, i);
+    }
+    modules_.push_back(std::move(mod));
+    return;
+  }
+
   if (!singleFunc) {
     mod.errorMessage = "Missing GetAxPlugin/GetAxPlugins entry point";
     AxPlug::OSUtils::UnloadLibrary(handle);
-    mod.handle = nullptr;
+    mod.handle = AxPlug::LibraryHandle();
     modules_.push_back(std::move(mod));
     return;
   }
@@ -168,10 +198,8 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
   mod.plugins.push_back(singleFunc());
   mod.isLoaded = true;
   mod.errorMessage = "OK";
-
   int moduleIndex = static_cast<int>(modules_.size());
   registerPlugin(mod.plugins[0], moduleIndex, 0);
-
   modules_.push_back(std::move(mod));
 }
 
@@ -238,6 +266,37 @@ IAxObject *AxPluginManager::CreateObjectById(uint64_t typeId) {
         return CreateObjectByIdInternal(typeId);
       },
       "Ax_CreateObjectById");
+}
+
+IAxObject *AxPluginManager::CreateObjectByIdNamed(uint64_t typeId, const char *implName) {
+  AX_PROFILE_FUNCTION();
+  return AxExceptionGuard::SafeCallPtr(
+      [&]() -> IAxObject * {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::string name = (implName && implName[0] != '\0') ? implName : "";
+        if (name.empty()) {
+          return CreateObjectByIdInternal(typeId);
+        }
+        auto key = std::make_pair(typeId, name);
+        auto it = namedImplRegistry_.find(key);
+        if (it == namedImplRegistry_.end()) {
+          AxErrorState::Set(AxErrorCode::PluginNotFound, (std::string("No named implementation '" + name + "' found for the given typeId")).c_str(), "CreateObjectByIdNamed");
+          return nullptr;
+        }
+        const auto &entry = allPlugins_[it->second];
+        const auto &mod = modules_[entry.moduleIndex];
+        if (!mod.isLoaded) {
+          AxErrorState::Set(AxErrorCode::PluginNotLoaded, "Plugin module is not loaded", "CreateObjectByIdNamed");
+          return nullptr;
+        }
+        const auto &pluginInfo = mod.plugins[entry.pluginIndex];
+        if (!pluginInfo.createFunc) {
+          AxErrorState::Set(AxErrorCode::FactoryFailed, "Plugin factory function is null", "CreateObjectByIdNamed");
+          return nullptr;
+        }
+        return pluginInfo.createFunc();
+      },
+      "Ax_CreateObjectByIdNamed");
 }
 
 IAxObject *AxPluginManager::GetSingleton(const char *interfaceName,
@@ -396,7 +455,10 @@ const char *AxPluginManager::GetPluginFileName(int index) const {
   std::shared_lock<std::shared_mutex> lock(mutex_);
   if (index < 0 || index >= static_cast<int>(allPlugins_.size()))
     return nullptr;
-  return modules_[allPlugins_[index].moduleIndex].fileName.c_str();
+  // thread_local snapshot: safe under shared_lock (no mutable member race)
+  thread_local std::string snapshot;
+  snapshot = modules_[allPlugins_[index].moduleIndex].fileName;
+  return snapshot.c_str();
 }
 
 int AxPluginManager::GetPluginType(int index) const {
@@ -415,8 +477,3 @@ bool AxPluginManager::IsPluginLoaded(int index) const {
   return modules_[allPlugins_[index].moduleIndex].isLoaded;
 }
 
-const char *AxPluginManager::GetLastError() const {
-  return AxErrorState::GetErrorMessage();
-}
-
-void AxPluginManager::ClearLastError() { AxErrorState::Clear(); }

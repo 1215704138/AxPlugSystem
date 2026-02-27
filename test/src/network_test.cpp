@@ -253,9 +253,9 @@ void testServerClientInteraction() {
       }
     }
 
-    // 断开客户端连接
+    // 断开客户端连接 (DisconnectClient already deletes the object)
     server->DisconnectClient(serverClient);
-    AxPlug::DestroyTool(serverClient);
+    serverClient = nullptr;
     std::cout << "✅ 服务器已断开客户端连接" << std::endl;
   } else {
     std::cout << "ℹ️  服务器未接受到连接（可能需要更长时间）" << std::endl;
@@ -326,9 +326,9 @@ void testNetworkPerformance() {
 void testBoostNetwork() {
   std::cout << "\n=== Boost网络插件测试 ===" << std::endl;
 
-  // 测试Boost TCP客户端
+  // 测试Boost TCP客户端 (通过命名绑定获取boost实现)
   std::cout << "\n--- Boost TCP客户端测试 ---" << std::endl;
-  auto boostClient = AxPlug::CreateTool<ITcpClient>();
+  auto boostClient = AxPlug::CreateTool<ITcpClient>("boost");
   if (boostClient) {
     std::cout << "✅ Boost TCP客户端创建成功！" << std::endl;
 
@@ -387,9 +387,9 @@ void testBoostNetwork() {
               << std::endl;
   }
 
-  // 测试Boost TCP服务器
+  // 测试Boost TCP服务器 (通过命名绑定获取boost实现)
   std::cout << "\n--- Boost TCP服务器测试 ---" << std::endl;
-  auto boostServer = AxPlug::CreateTool<ITcpServer>();
+  auto boostServer = AxPlug::CreateTool<ITcpServer>("boost");
   if (boostServer) {
     std::cout << "✅ Boost TCP服务器创建成功！" << std::endl;
 

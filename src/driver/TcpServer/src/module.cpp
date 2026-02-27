@@ -5,5 +5,5 @@
 
 AX_BEGIN_PLUGIN_MAP()
 AX_PLUGIN_TOOL(TcpServer, ITcpServer)
-AX_PLUGIN_TOOL(BoostTcpServer, ITcpServer)
+AX_PLUGIN_TOOL_NAMED(BoostTcpServer, ITcpServer, "boost")
 AX_END_PLUGIN_MAP()

@@ -833,7 +833,15 @@ uint64_t ImageUnifyService::SubmitFrame(void* data, int width, int height,
     uint64_t id = nextFrameId_.fetch_add(1);
     frame->original.frameId = id;
 
+    // Fix 3.7/3.16: Perform prefetchView BEFORE move to avoid dangling pointer
     FrameItem* rawFrame = frame.get();
+    if (!fusedConvert) {
+        // [优化5] 预取: prefetch must happen before ownership transfer
+        MemoryLayout predicted = predictLayout();
+        if (predicted != MemoryLayout::Unknown && predicted != rawFrame->original.layout) {
+            findOrCreateView(*rawFrame, predicted);
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lock(framesMutex_);
@@ -841,13 +849,8 @@ uint64_t ImageUnifyService::SubmitFrame(void* data, int width, int height,
         frameOrder_.push_back(id);
     }
 
-    // 被动GC
+    // 被动GC — after frame is safely stored
     performMaintenance();
-
-    // [优化5] 预取: 融合路径已完成转换, 无需再预取
-    if (!fusedConvert) {
-        prefetchView(*rawFrame);
-    }
 
     return id;
 }

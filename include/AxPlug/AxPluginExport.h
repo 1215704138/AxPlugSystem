@@ -3,7 +3,7 @@
 #include "IAxObject.h"
 
 // Plugin type
-enum class AxPluginType { Tool, Service };
+enum class AxPluginType : int { Tool, Service };
 
 // Plugin info structure - returned by each plugin DLL's entry point
 struct AxPluginInfo {
@@ -11,6 +11,7 @@ struct AxPluginInfo {
     uint64_t typeId;                     // FNV-1a hash of interfaceName (Hot Path key)
     AxPluginType type;                   // Tool or Service
     IAxObject* (*createFunc)();          // Object creation function pointer
+    const char* implName;                // Implementation name tag, e.g. "boost", "" for default
 };
 
 // Plugin entry point names
@@ -41,7 +42,20 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
             InterfaceType::ax_interface_name, \
             InterfaceType::ax_type_id, \
             AxPluginType::Tool, \
-            []() -> IAxObject* { return new TClass(); } \
+            []() -> IAxObject* { return new TClass(); }, \
+            "" \
+        }; \
+        return info; \
+    }
+
+#define AX_EXPORT_TOOL_NAMED(TClass, InterfaceType, ImplName) \
+    extern "C" AX_PLUGIN_EXPORT AxPluginInfo GetAxPlugin() { \
+        static AxPluginInfo info = { \
+            InterfaceType::ax_interface_name, \
+            InterfaceType::ax_type_id, \
+            AxPluginType::Tool, \
+            []() -> IAxObject* { return new TClass(); }, \
+            ImplName \
         }; \
         return info; \
     }
@@ -53,7 +67,20 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
             InterfaceType::ax_interface_name, \
             InterfaceType::ax_type_id, \
             AxPluginType::Service, \
-            []() -> IAxObject* { return new TClass(); } \
+            []() -> IAxObject* { return new TClass(); }, \
+            "" \
+        }; \
+        return info; \
+    }
+
+#define AX_EXPORT_SERVICE_NAMED(TClass, InterfaceType, ImplName) \
+    extern "C" AX_PLUGIN_EXPORT AxPluginInfo GetAxPlugin() { \
+        static AxPluginInfo info = { \
+            InterfaceType::ax_interface_name, \
+            InterfaceType::ax_type_id, \
+            AxPluginType::Service, \
+            []() -> IAxObject* { return new TClass(); }, \
+            ImplName \
         }; \
         return info; \
     }
@@ -68,10 +95,16 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
 //   AX_END_PLUGIN_MAP()
 
 #define AX_PLUGIN_TOOL(TClass, InterfaceType) \
-    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); } },
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, "" },
+
+#define AX_PLUGIN_TOOL_NAMED(TClass, InterfaceType, ImplName) \
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, ImplName },
 
 #define AX_PLUGIN_SERVICE(TClass, InterfaceType) \
-    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); } },
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); }, "" },
+
+#define AX_PLUGIN_SERVICE_NAMED(TClass, InterfaceType, ImplName) \
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); }, ImplName },
 
 #define AX_BEGIN_PLUGIN_MAP() \
     extern "C" AX_PLUGIN_EXPORT const AxPluginInfo* GetAxPlugins(int* count) { \

@@ -19,7 +19,7 @@ BoostTcpClient::BoostTcpClient()
     , local_port_(0)
     , remote_port_(0)
 {
-    SetSocketOptions();
+    // Fix 3.13: Removed SetSocketOptions() — socket is not open yet
 }
 
 BoostTcpClient::~BoostTcpClient() {
@@ -28,6 +28,29 @@ BoostTcpClient::~BoostTcpClient() {
 
 void BoostTcpClient::Destroy() {
     delete this;
+}
+
+bool BoostTcpClient::AttachSocket(boost::asio::ip::tcp::socket&& socket) {
+    if (connected_.load() || connecting_.load()) {
+        return false;
+    }
+    try {
+        stopped_.store(false);
+        *socket_ = std::move(socket);
+        connected_.store(true);
+        SetSocketOptions();
+        UpdateAddressInfo();
+        return true;
+    } catch (const std::exception& e) {
+        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
+        return false;
+    }
+}
+
+void BoostTcpClient::AttachUpdateState() {
+    connected_.store(true);
+    SetSocketOptions();
+    UpdateAddressInfo();
 }
 
 bool BoostTcpClient::Connect(const char* host, int port) {
@@ -70,13 +93,11 @@ bool BoostTcpClient::Connect(const char* host, int port) {
                         HandleConnect(ec);
                         
                         if (!ec) {
-                            // 更新地址信息
                             remote_address_ = host;
                             remote_port_ = port;
                             UpdateAddressInfo();
-                            
-                            // 启动接收
-                            StartReceive();
+                            // Fix 1.9: Removed StartReceive() - no io_context driver thread exists after run_for() returns,
+                            // so async_receive callbacks would never fire. Sync Receive() via read_some still works.
                         }
                     });
             });

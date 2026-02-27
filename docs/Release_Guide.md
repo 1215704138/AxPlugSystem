@@ -15,7 +15,6 @@
     - `scripts\build_release_with_test.bat` (包含测试)
     - `scripts\build_release_no_test.bat` (纯净版 SDK)
 
-> **注意**: 旧版 `build_publish_*.bat` 脚本功能已包含在 `_no_test` 版本中。
 
 生成的 `publish` 目录即为 **SDK 包**。
 
@@ -75,9 +74,9 @@ add_library(MyNewPlugin SHARED src/MyPlugin.cpp)
 # 4. 链接库目录
 target_link_directories(MyNewPlugin PRIVATE ${AXPLUG_SDK_DIR}/lib)
 
-# 5. 链接核心库 (仅用于符号解析，插件本身不依赖 AxCore.dll)
-# 注意：插件开发通常只需要 AxInterface (header-only)，但为了方便通常提供 AxCore.lib
-# 如果是开发宿主程序(exe)，则必须链接 AxCore
+# 5. 链接核心库 
+# 注意：v3 架构重构后，无论是开发插件 DLL 还是宿主程序(exe)都必须链接 AxCore 
+# （为了保证异常状态 AxError 和 性能采样 AxProfiler 的 TLS 状态跨 DLL 一致性）。
 target_link_libraries(MyNewPlugin PRIVATE AxCore)
 
 # 6. 定义导出宏

@@ -15,7 +15,7 @@ BoostTcpServer::BoostTcpServer()
     , listen_port_(0)
     , error_code_(0)
 {
-    SetAcceptorOptions();
+    // Fix 3.11: Removed SetAcceptorOptions() — acceptor is not open yet
 }
 
 BoostTcpServer::~BoostTcpServer() {
@@ -53,13 +53,12 @@ bool BoostTcpServer::Listen(int port, int backlog) {
         // 更新监听地址信息
         listen_address_ = acceptor_->local_endpoint().address().to_string();
         
-        // 启动工作线程
-        StartWorkerThreads();
-        
-        // 开始接受连接
-        StartAccept();
-        
+        // Fix 2.12/A.11: Set running_ BEFORE starting threads and accept,
+        // so IsListening()/IsRunning() returns true once connections begin.
         running_.store(true);
+        
+        StartWorkerThreads();
+        StartAccept();
         
         return true;
         
@@ -108,14 +107,11 @@ bool BoostTcpServer::IsRunning() const {
 
 ITcpClient* BoostTcpServer::Accept() {
     std::lock_guard<std::mutex> lock(clients_mutex_);
-    
-    // 查找新连接的客户端
-    for (auto& client : clients_) {
-        if (client && client->IsConnected()) {
-            return client.get();
-        }
+    if (!pending_clients_.empty()) {
+        ITcpClient* client = pending_clients_.back();
+        pending_clients_.pop_back();
+        return client;
     }
-    
     return nullptr;
 }
 
@@ -140,6 +136,7 @@ bool BoostTcpServer::DisconnectClient(ITcpClient* client) {
         if (index < clients_.size() && clients_[index].get() == client) {
             clients_[index]->Disconnect();
             client_index_map_.erase(it);
+            clients_[index].reset();
             return true;
         }
     }
@@ -157,6 +154,8 @@ bool BoostTcpServer::DisconnectAllClients() {
     }
     
     client_index_map_.clear();
+    pending_clients_.clear();
+    clients_.clear();
     return true;
 }
 
@@ -241,12 +240,10 @@ void BoostTcpServer::StartAccept() {
         return;
     }
     
-    // 检查连接数限制
     if (GetConnectedCount() >= max_connections_) {
-        // 延迟重新开始接受
-        auto timer = std::make_unique<boost::asio::deadline_timer>(*io_context_);
-        timer->expires_from_now(boost::posix_time::milliseconds(100));
-        timer->async_wait([this](const boost::system::error_code& ec) {
+        retry_timer_ = std::make_unique<boost::asio::deadline_timer>(*io_context_);
+        retry_timer_->expires_from_now(boost::posix_time::milliseconds(100));
+        retry_timer_->async_wait([this](const boost::system::error_code& ec) {
             if (!ec) {
                 StartAccept();
             }
@@ -254,33 +251,29 @@ void BoostTcpServer::StartAccept() {
         return;
     }
     
-    acceptor_->async_accept(*accept_socket_,
-        [this](const boost::system::error_code& ec) {
-            HandleAccept(ec);
-        });
+    accept_socket_ = std::make_unique<boost::asio::ip::tcp::socket>(*io_context_);
+    acceptor_->async_accept(*accept_socket_, [this](const boost::system::error_code& ec) { HandleAccept(ec); });
 }
 
 void BoostTcpServer::HandleAccept(const boost::system::error_code& ec) {
     if (ec) {
         UpdateError(ec);
         if (ec != boost::asio::error::operation_aborted) {
-            // 如果不是主动取消，继续接受连接
             StartAccept();
         }
         return;
     }
     
     try {
-        // 创建新的客户端连接
         auto client = std::make_unique<BoostTcpClient>();
         
-        // 将socket的所有权转移给客户端
-        // 注意：这里需要修改BoostTcpClient以支持外部socket注入
-        // 为了简化，我们重新创建连接
-        client->Connect(accept_socket_->remote_endpoint().address().to_string().c_str(),
-                       accept_socket_->remote_endpoint().port());
+        // Fix 1.5: Transfer accepted socket ownership to client via AttachSocket
+        if (!client->AttachSocket(std::move(*accept_socket_))) {
+            UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
+            StartAccept();
+            return;
+        }
         
-        // 添加到客户端列表
         std::lock_guard<std::mutex> lock(clients_mutex_);
         
         size_t index = GetNextClientIndex();
@@ -291,23 +284,17 @@ void BoostTcpServer::HandleAccept(const boost::system::error_code& ec) {
             index = clients_.size() - 1;
         }
         
-        // 更新索引映射
         ITcpClient* client_ptr = clients_[index].get();
         client_index_map_[client_ptr] = index;
-        
-        // 设置客户端超时
         client_ptr->SetTimeout(timeout_ms_);
         
+        // Fix 1.13: Push to pending queue so Accept() returns only new connections
+        pending_clients_.push_back(client_ptr);
+        
     } catch (const std::exception& e) {
-        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, 
-                                            boost::system::system_category()));
+        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
     }
     
-    // 关闭accept socket
-    boost::system::error_code close_ec;
-    accept_socket_->close(close_ec);
-    
-    // 继续接受下一个连接
     StartAccept();
 }
 
@@ -412,7 +399,8 @@ void BoostTcpServer::CleanupDisconnectedClients() {
 
 void BoostTcpServer::WorkerThread(size_t thread_id) {
     try {
-        boost::asio::io_context::work work(*io_context_);
+        // Fix 3.10: Replace deprecated io_context::work with executor_work_guard
+        auto work = boost::asio::make_work_guard(*io_context_);
         io_context_->run();
         
     } catch (const std::exception& e) {

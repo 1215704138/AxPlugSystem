@@ -13,8 +13,6 @@
 class BoostTcpClient;
 
 class BoostTcpServer : public ITcpServer {
-    AX_INTERFACE(BoostTcpServer)
-
 public:
     BoostTcpServer();
     virtual ~BoostTcpServer();
@@ -66,7 +64,11 @@ private:
     mutable std::mutex clients_mutex_;
     std::vector<std::unique_ptr<BoostTcpClient>> clients_;
     std::unordered_map<ITcpClient*, size_t> client_index_map_;
+    std::vector<ITcpClient*> pending_clients_;
     int max_connections_;
+
+    // 延迟重试定时器（防止 UAF）
+    std::unique_ptr<boost::asio::deadline_timer> retry_timer_;
     
     // 配置参数
     int timeout_ms_;

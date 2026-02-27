@@ -3,6 +3,7 @@
 # 生成动态库（用于运行时跨模块单例）
 add_library(AxCore SHARED
     AxPluginManager.cpp
+    AxProfiler.cpp
     AxCoreDll.cpp
 )
 

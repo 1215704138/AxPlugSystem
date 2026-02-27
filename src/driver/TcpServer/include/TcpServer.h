@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <atomic>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -15,6 +16,7 @@ class TcpServer;
 
 // TCP客户端实现（用于服务器返回的连接）
 class TcpClientConnection : public ITcpClient {
+    friend class TcpServer;
 public:
     TcpClientConnection(SOCKET socket, TcpServer* server);
     ~TcpClientConnection();
@@ -24,13 +26,14 @@ protected:
 
 private:
     SOCKET socket_;
-    bool isConnected_;
+    std::atomic<bool> isConnected_;  // Fix 2.4: atomic for thread safety
     int timeout_;
     int bufferSize_;
     std::string localAddr_;
     std::string remoteAddr_;
     int localPort_;
     int remotePort_;
+    mutable std::mutex errorMutex_;  // Fix 2.9: protect lastError_/errorCode_
     mutable std::string lastError_;
     mutable int errorCode_;
     
@@ -77,14 +80,15 @@ public:
 class TcpServer : public ITcpServer {
 private:
     SOCKET listenSocket_;
-    bool isListening_;
-    bool isRunning_;
+    std::atomic<bool> isListening_;   // Fix 2.4: atomic for thread safety
+    std::atomic<bool> isRunning_;    // Fix 2.4: atomic for thread safety
     int maxConnections_;
     int timeout_;
     bool reuseAddress_;
     std::string listenAddr_;
     int listenPort_;
-    mutable std::vector<TcpClientConnection*> clients_;
+    std::vector<TcpClientConnection*> clients_;  // Fix 3.12: removed unnecessary mutable
+    mutable std::mutex errorMutex_;  // Fix 2.9: protect lastError_/errorCode_
     mutable std::string lastError_;
     mutable int errorCode_;
     
@@ -92,7 +96,7 @@ private:
     mutable std::mutex clientsMutex_;
     
     // 析构标志
-    bool isDestroying_;
+    std::atomic<bool> isDestroying_;  // Fix 2.4: atomic for thread safety
     
     // 私有方法
     bool createSocket();

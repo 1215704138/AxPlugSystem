@@ -1,22 +1,10 @@
 #include "../include/UdpSocket.h"
+#include "AxPlug/WinsockInit.hpp"  // Fix 3.8: unified Winsock init
 #include <algorithm>
 #include <cstring>
 #include <iostream>
 
-
-// Winsock 初始化 (复用现有的)
-class WinsockInitializer {
-public:
-  WinsockInitializer() {
-    WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
-      std::cerr << "WSAStartup failed: " << result << std::endl;
-    }
-  }
-  ~WinsockInitializer() { WSACleanup(); }
-};
-static WinsockInitializer wsInit;
+static auto& wsInit_ = AxPlug::GetWinsockInit();
 
 UdpSocket::UdpSocket()
     : socket_(INVALID_SOCKET), isBound_(false), timeout_(5000),
@@ -58,9 +46,8 @@ bool UdpSocket::setSocketOptions() {
 
   // 设置广播
   if (broadcastEnabled_) {
-    bool broadcast = true;
-    setsockopt(socket_, SOL_SOCKET, SO_BROADCAST, (char *)&broadcast,
-               sizeof(broadcast));
+    int broadcast = 1;  // Fix 3.14: SO_BROADCAST expects int, not bool
+    setsockopt(socket_, SOL_SOCKET, SO_BROADCAST, (char *)&broadcast, sizeof(broadcast));
   }
 
   return true;
@@ -250,9 +237,8 @@ bool UdpSocket::EnableBroadcast(bool enable) {
   }
 
   broadcastEnabled_ = enable;
-  bool broadcast = enable;
-  if (setsockopt(socket_, SOL_SOCKET, SO_BROADCAST, (char *)&broadcast,
-                 sizeof(broadcast)) == SOCKET_ERROR) {
+  int broadcast = enable ? 1 : 0;  // Fix 3.14: SO_BROADCAST expects int, not bool
+  if (setsockopt(socket_, SOL_SOCKET, SO_BROADCAST, (char *)&broadcast, sizeof(broadcast)) == SOCKET_ERROR) {
     setError("设置广播失败", WSAGetLastError());
     return false;
   }

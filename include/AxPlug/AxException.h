@@ -5,49 +5,43 @@
 
 // ============================================================
 // AxException - Cross-module Exception Handling
-// Thread-local error storage + exception guard for safe DLL calls
+// Error storage lives in AxCore.dll (canonical thread_local).
+// All DLLs route through C API to ensure cross-DLL visibility.
 // ============================================================
 
-// Error info structure
-struct AxError {
-    int code = 0;            // 0 = no error
-    std::string message;
-    std::string source;      // which function/module raised the error
+// AX_CORE_API: dllexport inside AxCore, dllimport everywhere else
+#ifndef AX_CORE_API
+#ifdef AX_CORE_EXPORTS
+#define AX_CORE_API __declspec(dllexport)
+#else
+#ifdef _WIN32
+#define AX_CORE_API __declspec(dllimport)
+#else
+#define AX_CORE_API
+#endif
+#endif
+#endif
 
-    bool HasError() const { return code != 0; }
-    void Clear() { code = 0; message.clear(); source.clear(); }
-};
+// C API for cross-DLL error handling (implemented in AxCore.dll)
+extern "C" {
+AX_CORE_API void Ax_SetError(int code, const char* message, const char* source);
+AX_CORE_API int Ax_GetErrorCode();
+AX_CORE_API const char* Ax_GetLastError();
+AX_CORE_API const char* Ax_GetErrorSource();
+AX_CORE_API bool Ax_HasErrorState();
+AX_CORE_API void Ax_ClearLastError();
+}
 
-// Thread-local error storage
+// Thread-safe error state — routes through AxCore.dll C API for cross-DLL safety
 class AxErrorState {
 public:
-    static AxError& GetThreadLocal() {
-        thread_local AxError error;
-        return error;
-    }
-
     static void Set(int code, const char* message, const char* source = "") {
-        auto& err = GetThreadLocal();
-        err.code = code;
-        err.message = message ? message : "";
-        err.source = source ? source : "";
+        Ax_SetError(code, message ? message : "", source ? source : "");
     }
-
-    static void Clear() {
-        GetThreadLocal().Clear();
-    }
-
-    static bool HasError() {
-        return GetThreadLocal().HasError();
-    }
-
-    static const char* GetErrorMessage() {
-        return GetThreadLocal().message.c_str();
-    }
-
-    static int GetCode() {
-        return GetThreadLocal().code;
-    }
+    static void Clear() { Ax_ClearLastError(); }
+    static bool HasError() { return Ax_HasErrorState(); }
+    static const char* GetErrorMessage() { return Ax_GetLastError(); }
+    static int GetCode() { return Ax_GetErrorCode(); }
 };
 
 // Exception guard - wraps cross-module calls with try/catch

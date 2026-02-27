@@ -1,4 +1,4 @@
-# AxPlug v3 插件框架 · 使用手册
+# AxPlug 插件框架 · 使用手册
 
 ## 目录
 
@@ -7,16 +7,18 @@
 3. [快速开始](#3-快速开始)
 4. [使用 Tool（工具插件）](#4-使用-tool工具插件)
 5. [使用 Service（服务插件）](#5-使用-service服务插件)
-6. [查询已加载插件](#6-查询已加载插件)
-7. [开发 Tool 插件](#7-开发-tool-插件)
-8. [开发多插件 DLL](#8-开发多插件-dll)
-9. [开发 Service 插件](#9-开发-service-插件)
-10. [核心服务 — 日志](#10-核心服务--日志)
-11. [核心服务 — 图像统一](#11-核心服务--图像统一)
-12. [驱动插件 — TCP / UDP](#12-驱动插件--tcp--udp)
-13. [构建与部署](#13-构建与部署)
-14. [v3 新特性 — 智能指针 / Profiler / 异常处理 / 并发](#14-v3-新特性)
-15. [常见问题](#15-常见问题)
+6. [命名绑定（接口→多实现）](#6-命名绑定接口多实现)
+7. [查询已加载插件](#7-查询已加载插件)
+8. [开发 Tool 插件](#8-开发-tool-插件)
+9. [开发多插件 DLL](#9-开发多插件-dll)
+10. [开发 Service 插件](#10-开发-service-插件)
+11. [核心服务 — 日志](#11-核心服务--日志)
+12. [核心服务 — 图像统一](#12-核心服务--图像统一)
+13. [驱动插件 — TCP / UDP](#13-驱动插件--tcp--udp)
+14. [构建与部署](#14-构建与部署)
+15. [智能指针 / Profiler / 异常处理 / 并发](#15-智能指针--profiler--异常处理--并发)
+16. [使用注意事项](#16-使用注意事项)
+17. [常见问题](#17-常见问题)
 
 ---
 
@@ -31,11 +33,12 @@ AxPlug 是一个现代化的工业级 C++17 插件框架，支持动态加载 DL
 - 编译期字符串字面量 + FNV-1a typeId 作为类型键，保证跨 DLL 一致
 - Tool（多实例）和 Service（命名单例）两种插件模型
 - 插件 DLL 放在 exe 同目录即可自动发现
-- **一个 DLL 可导出多个插件**，声明式宏，完全向后兼容
-- **[v3] 智能指针** (`AxPtr<T>` / `shared_ptr`) 自动引用计数 + 手动 `DestroyTool` 双模式
-- **[v3] 内置 Profiler** 生成 Chrome trace.json，`AX_PROFILE_SCOPE` 宏
-- **[v3] 跨模块异常保护** `AxExceptionGuard` + 线程局部错误存储
-- **[v3] 高性能并发** `shared_mutex` 读写锁 + typeId O(1) 热路径
+- 一个 DLL 可导出多个插件，声明式宏，完全向后兼容
+- **命名绑定**：同一接口支持多个实现，通过名称选择（如 `CreateTool<ITcpServer>("boost")`）
+- **智能指针** (`AxPtr<T>` / `shared_ptr`) 自动引用计数 + 手动 `DestroyTool` 双模式
+- **内置 Profiler** 生成 Chrome trace.json，流式写入防止内存溢出
+- **跨模块异常保护** `AxExceptionGuard` + 跨 DLL 线程局部错误存储（通过 AxCore C API 路由）
+- **高性能并发** `shared_mutex` 读写锁 + typeId O(1) 热路径
 
 ---
 
@@ -229,7 +232,53 @@ AxPlug::ReleaseService<ILoggerService>();               // 释放默认单例
 
 ---
 
-## 6. 查询已加载插件
+## 6. 命名绑定（接口→多实现）
+
+当同一接口存在多个实现时（如 `ITcpServer` 有 winsock 版和 boost 版），可通过命名绑定选择具体实现。
+
+### 6.1 使用方式
+
+```cpp
+#include "driver/ITcpServer.h"
+
+// 获取默认实现（第一个注册的）
+auto server = AxPlug::CreateTool<ITcpServer>();
+
+// 获取指定名称的实现
+auto boostServer = AxPlug::CreateTool<ITcpServer>("boost");
+
+// 不存在的名称返回 nullptr
+auto invalid = AxPlug::CreateTool<ITcpServer>("nonexistent"); // nullptr
+```
+
+### 6.2 注册命名实现（插件开发者）
+
+在 `module.cpp` 中使用 `_NAMED` 宏：
+
+```cpp
+AX_BEGIN_PLUGIN_MAP()
+    AX_PLUGIN_TOOL(TcpServer, ITcpServer)                       // 默认实现
+    AX_PLUGIN_TOOL_NAMED(BoostTcpServer, ITcpServer, "boost")   // 命名实现
+AX_END_PLUGIN_MAP()
+```
+
+单插件 DLL 版本：
+
+```cpp
+AX_EXPORT_TOOL_NAMED(BoostTcpServer, ITcpServer, "boost")
+```
+
+### 6.3 内置命名绑定
+
+| 接口 | 默认实现 | 命名实现 |
+|------|----------|----------|
+| `ITcpServer` | TcpServer (winsock) | `"boost"` → BoostTcpServer |
+| `ITcpClient` | TcpClient (winsock) | `"boost"` → BoostTcpClient |
+| `IUdpSocket` | UdpSocket (winsock) | `"boost"` → BoostUdpSocket |
+
+---
+
+## 7. 查询已加载插件
 
 ```cpp
 int count = AxPlug::GetPluginCount();
@@ -245,7 +294,7 @@ for (int i = 0; i < count; i++) {
 
 ---
 
-## 7. 开发 Tool 插件
+## 8. 开发 Tool 插件
 
 ### 7.1 定义接口
 
@@ -317,17 +366,17 @@ set_target_properties(MathPlugin PROPERTIES
 
 ---
 
-## 8. 开发多插件 DLL
+## 9. 开发多插件 DLL
 
 一个 DLL 可以导出多个插件，使用声明式宏，清晰易用。
 
-### 8.1 使用场景
+### 9.1 使用场景
 
 - **功能相关的插件组合**：如数学库同时提供基础计算和高级计算
 - **减少 DLL 数量**：简化部署，减少文件数量
 - **共享内部实现**：多个插件可共享内部辅助类或资源
 
-### 8.2 开发步骤
+### 9.2 开发步骤
 
 **1. 定义多个接口**
 
@@ -384,14 +433,16 @@ AX_BEGIN_PLUGIN_MAP()
 AX_END_PLUGIN_MAP()
 ```
 
-### 8.3 宏说明
+### 9.3 宏说明
 
 - `AX_BEGIN_PLUGIN_MAP()` 开始多插件声明
-- `AX_PLUGIN_TOOL(TClass, InterfaceType)` 声明 Tool 插件
-- `AX_PLUGIN_SERVICE(TClass, InterfaceType)` 声明 Service 插件
+- `AX_PLUGIN_TOOL(TClass, InterfaceType)` 声明 Tool 插件（默认实现）
+- `AX_PLUGIN_TOOL_NAMED(TClass, InterfaceType, ImplName)` 声明命名 Tool 插件
+- `AX_PLUGIN_SERVICE(TClass, InterfaceType)` 声明 Service 插件（默认实现）
+- `AX_PLUGIN_SERVICE_NAMED(TClass, InterfaceType, ImplName)` 声明命名 Service 插件
 - `AX_END_PLUGIN_MAP()` 结束声明
 
-### 8.4 使用方式
+### 9.4 使用方式
 
 用户侧 API 完全不变：
 
@@ -411,7 +462,7 @@ for (int i = 0; i < count; i++) {
 // 插件 1: ICalculator (MathSuite.dll)
 ```
 
-### 8.5 向后兼容
+### 9.5 向后兼容
 
 - **现有单插件 DLL**：无需修改，继续使用 `AX_EXPORT_TOOL` / `AX_EXPORT_SERVICE`
 - **用户侧代码**：无需修改，API 保持不变
@@ -419,7 +470,7 @@ for (int i = 0; i < count; i++) {
 
 ---
 
-## 9. 开发 Service 插件
+## 10. 开发 Service 插件
 
 与 Tool 唯一的区别是导出宏使用 `AX_EXPORT_SERVICE`：
 
@@ -435,7 +486,7 @@ AX_EXPORT_SERVICE(LoggerService, ILoggerService)
 
 ---
 
-## 10. 核心服务 — 日志
+## 11. 核心服务 — 日志
 
 ```cpp
 #include "core/LoggerService.h"
@@ -468,7 +519,7 @@ AxPlug::ReleaseService<ILoggerService>("app");
 
 ---
 
-## 11. 核心服务 — 图像统一
+## 12. 核心服务 — 图像统一
 
 ```cpp
 #include "core/IImageUnifyService.h"
@@ -485,60 +536,65 @@ AxPlug::ReleaseService<IImageUnifyService>();
 
 ---
 
-## 12. 驱动插件 — TCP / UDP
+## 13. 驱动插件 — TCP / UDP
 
-### 12.1 TCP 客户端
+所有网络驱动接口支持命名绑定，默认为 winsock 实现，可通过 `"boost"` 获取 Boost.Asio 实现。
+
+### 13.1 TCP 客户端
 
 ```cpp
 #include "driver/ITcpClient.h"
 
-auto* client = AxPlug::CreateTool<ITcpClient>();
+// 默认实现 (winsock)
+auto client = AxPlug::CreateTool<ITcpClient>();
+// Boost 实现
+auto boostClient = AxPlug::CreateTool<ITcpClient>("boost");
+
 client->SetTimeout(3000);
 client->Connect("127.0.0.1", 8080);
 client->SendString("Hello");
 
 char buf[1024]; size_t len;
 client->ReceiveString(buf, sizeof(buf), len);
-
 client->Disconnect();
-AxPlug::DestroyTool(client);
 ```
 
-### 12.2 TCP 服务器
+### 13.2 TCP 服务器
 
 ```cpp
 #include "driver/ITcpServer.h"
 
-auto* server = AxPlug::CreateTool<ITcpServer>();
+// 默认实现 (winsock)
+auto server = AxPlug::CreateTool<ITcpServer>();
+// Boost 实现
+auto boostServer = AxPlug::CreateTool<ITcpServer>("boost");
+
 server->SetMaxConnections(10);
 server->Listen(8080);
-
 // ... 接受连接、收发数据 ...
-
 server->StopListening();
-AxPlug::DestroyTool(server);
 ```
 
-### 12.3 UDP 套接字
+### 13.3 UDP 套接字
 
 ```cpp
 #include "driver/IUdpSocket.h"
 
-auto* udp = AxPlug::CreateTool<IUdpSocket>();
+auto udp = AxPlug::CreateTool<IUdpSocket>();          // 默认
+auto boostUdp = AxPlug::CreateTool<IUdpSocket>("boost"); // Boost
+
 udp->Bind(9000);
 udp->SendStringTo("127.0.0.1", 9001, "Hello UDP");
 
 char buf[1024]; size_t len;
 char host[64]; int port;
 udp->ReceiveStringFrom(host, sizeof(host), port, buf, sizeof(buf), len);
-
 udp->Unbind();
-AxPlug::DestroyTool(udp);
 ```
 
 ---
 
-## 13. 构建与部署
+## 14. 构建与部署
 
 ### 13.1 项目结构
 
@@ -567,9 +623,9 @@ AxPlug/
 
 ---
 
-## 14. v3 新特性
+## 15. 智能指针 / Profiler / 异常处理 / 并发
 
-### 14.1 智能指针 (AxPtr)
+### 15.1 智能指针 (AxPtr)
 
 ```cpp
 // 自动引用计数 - 无需手动 DestroyTool
@@ -585,7 +641,9 @@ AxPtr<IMath> math = AxPlug::CreateTool<IMath>();
 AxPlug::DestroyTool(math);  // math 变为 nullptr
 ```
 
-### 14.2 内置 Profiler
+### 15.2 内置 Profiler
+
+Profiler 采用流式写入，每 8192 条自动刷盘，适合长时间运行场景。
 
 ```cpp
 // 启动分析会话
@@ -607,13 +665,14 @@ AxPlug::ProfilerEnd();
 // 在 chrome://tracing 中打开 trace.json 可视化
 ```
 
-### 14.3 异常处理
+### 15.3 异常处理
+
+错误存储在 AxCore.dll 中的 `thread_local` 变量中，所有 DLL（包括插件）通过 C API 路由，确保跨 DLL 可见性。
 
 ```cpp
 // 所有 API 调用自动包裹异常保护
 auto* obj = AxPlug::CreateToolRaw<IMath>();
 if (!obj) {
-    // 检查错误
     if (AxPlug::HasError()) {
         const char* err = AxPlug::GetLastError();
         printf("错误: %s\n", err);
@@ -622,7 +681,7 @@ if (!obj) {
 }
 ```
 
-### 14.4 多线程并发
+### 15.4 多线程并发
 
 ```cpp
 // v3 使用 shared_mutex 读写锁，多线程安全
@@ -642,18 +701,47 @@ for (auto& t : threads) t.join();
 
 ---
 
-## 15. 常见问题
+## 16. 使用注意事项
+
+### 16.1 对象销毁
+
+- **推荐**使用智能指针 (`CreateTool<T>()`) 自动管理生命周期
+- 使用原始指针时，**必须**通过 `AxPlug::DestroyTool(ptr)` 或让 `shared_ptr` deleter 自动释放
+- **禁止**直接 `delete` 插件对象，必须通过框架提供的 `DestroyTool` 接口销毁
+
+### 16.2 Profiler 宏
+
+`AX_PROFILE_SCOPE(name)` 的 `name` 参数必须是**静态字符串**（字符串字面量或 `__FUNCTION__`），不要传入动态生成的 `std::string::c_str()`。
+
+```cpp
+// 正确
+AX_PROFILE_SCOPE("MyFunction");
+AX_PROFILE_FUNCTION();  // 使用 __FUNCTION__
+
+// 危险 — 避免
+std::string name = "Process_" + std::to_string(id);
+AX_PROFILE_SCOPE(name.c_str());  // name 必须在 scope 结束前有效
+```
+
+### 16.3 WinsockInit 析构顺序
+
+网络插件 DLL 使用 `WinsockInit` 管理 WSA 生命周期。在正常关闭流程中，socket 对象应在 DLL 卸载前释放。进程退出时 Windows 自动回收 socket 资源。
+
+---
+
+## 17. 常见问题
 
 | 现象 | 解决方案 |
 |------|----------|
 | `CreateTool` 返回 nullptr | 检查插件 DLL 是否在 exe 目录，接口是否有 `AX_INTERFACE` 宏。检查 `AxPlug::GetLastError()` |
+| 命名绑定返回 nullptr | 检查 `implName` 拼写是否正确，确认插件使用了 `AX_PLUGIN_TOOL_NAMED` 宏注册 |
 | 链接错误：找不到 `Ax_*` 函数 | CMake 中添加 `target_link_libraries(... AxCore)` |
 | Service 返回旧实例 | 先 `ReleaseService<T>(name)` 再重新 `GetService` |
 | DLL 加载失败 | 确保所有模块使用相同的 MSVC 运行时 (MD/MDd) |
 | 接口匹配失败 | 确认接口头文件中有 `AX_INTERFACE(类名)` 宏 |
-| 多线程崩溃 | v3 已使用 shared_mutex，框架 API 线程安全。检查插件自身是否线程安全 |
+| 多线程崩溃 | 框架 API 线程安全（shared_mutex）。检查插件自身是否线程安全 |
 | Profiler 无输出 | 确认调用了 `AxPlug::ProfilerBegin()` 和 `AxPlug::ProfilerEnd()` |
 
 ---
 
-*AxPlug v3 · 使用手册 · 2026年2月*
+*AxPlug 插件框架 · 使用手册*

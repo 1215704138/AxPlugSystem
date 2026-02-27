@@ -41,19 +41,19 @@ AX_CORE_API bool Ax_IsPluginLoaded(int index);
 
 // v3: TypeId Fast Path API
 AX_CORE_API IAxObject *Ax_CreateObjectById(uint64_t typeId);
+AX_CORE_API IAxObject *Ax_CreateObjectByIdNamed(uint64_t typeId, const char *implName);
 AX_CORE_API IAxObject *Ax_GetSingletonById(uint64_t typeId,
                                            const char *serviceName);
 AX_CORE_API void Ax_ReleaseSingletonById(uint64_t typeId,
                                          const char *serviceName);
 
 // v3: Profiler API
-AX_CORE_API void Ax_ProfilerBeginSession(const char *name,
-                                         const char *filepath);
+AX_CORE_API void Ax_ProfilerBeginSession(const char *name, const char *filepath);
 AX_CORE_API void Ax_ProfilerEndSession();
+AX_CORE_API void Ax_ProfilerWriteProfile(const AxProfileResult *result);
+AX_CORE_API int  Ax_ProfilerIsActive();
 
-// v3: Error Handling API
-AX_CORE_API const char *Ax_GetLastError();
-AX_CORE_API void Ax_ClearLastError();
+// v3: Error Handling API (declarations in AxException.h)
 }
 
 // Plugin query info
@@ -111,6 +111,17 @@ template <typename T> inline std::shared_ptr<T> CreateTool() {
   });
 }
 
+// Create a tool instance by named implementation (e.g. CreateTool<ITcpServer>("boost"))
+template <typename T> inline std::shared_ptr<T> CreateTool(const char *implName) {
+  IAxObject *obj = Ax_CreateObjectByIdNamed(T::ax_type_id, implName);
+  if (!obj)
+    return nullptr;
+  return std::shared_ptr<T>(static_cast<T *>(obj), [](T *p) {
+    if (p)
+      Ax_ReleaseObject(p);
+  });
+}
+
 // Explicitly reset a smart pointer tool (triggers destruction if last
 // reference)
 template <typename T> inline void DestroyTool(std::shared_ptr<T> &tool) {
@@ -123,6 +134,12 @@ template <typename T> inline void DestroyTool(std::shared_ptr<T> &tool) {
 // User MUST call DestroyTool(raw pointer) when done
 template <typename T> inline T *CreateToolRaw() {
   IAxObject *obj = Ax_CreateObjectById(T::ax_type_id);
+  return static_cast<T *>(obj);
+}
+
+// Create a raw pointer tool by named implementation
+template <typename T> inline T *CreateToolRaw(const char *implName) {
+  IAxObject *obj = Ax_CreateObjectByIdNamed(T::ax_type_id, implName);
   return static_cast<T *>(obj);
 }
 
@@ -185,10 +202,7 @@ inline const char *GetLastError() { return Ax_GetLastError(); }
 inline void ClearLastError() { Ax_ClearLastError(); }
 
 // Check if the last operation produced an error
-inline bool HasError() {
-  const char *err = Ax_GetLastError();
-  return err && err[0] != '\0';
-}
+inline bool HasError() { return Ax_HasErrorState(); }
 
 } // namespace AxPlug
 

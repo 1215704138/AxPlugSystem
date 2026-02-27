@@ -5,5 +5,5 @@
 
 AX_BEGIN_PLUGIN_MAP()
 AX_PLUGIN_TOOL(UdpSocket, IUdpSocket)
-AX_PLUGIN_TOOL(BoostUdpSocket, IUdpSocket)
+AX_PLUGIN_TOOL_NAMED(BoostUdpSocket, IUdpSocket, "boost")
 AX_END_PLUGIN_MAP()

@@ -11,10 +11,17 @@ EXPORTS
     Ax_GetPluginType
     Ax_IsPluginLoaded
     Ax_CreateObjectById
+    Ax_CreateObjectByIdNamed
     Ax_GetSingletonById
     Ax_ReleaseSingletonById
     Ax_ProfilerBeginSession
     Ax_ProfilerEndSession
+    Ax_ProfilerWriteProfile
+    Ax_ProfilerIsActive
+    Ax_SetError
+    Ax_GetErrorCode
     Ax_GetLastError
+    Ax_GetErrorSource
+    Ax_HasErrorState
     Ax_ClearLastError
 

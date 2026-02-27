@@ -1,22 +1,9 @@
 #include "../include/TcpClient.h"
+#include "AxPlug/WinsockInit.hpp"  // Fix 3.8: unified Winsock init
 #include <iostream>
 #include <cstring>
 
-// Winsock 初始化
-class WinsockInitializer {
-public:
-    WinsockInitializer() {
-        WSADATA wsaData;
-        int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-        if (result != 0) {
-            std::cerr << "WSAStartup failed: " << result << std::endl;
-        }
-    }
-    ~WinsockInitializer() {
-        WSACleanup();
-    }
-};
-static WinsockInitializer wsInit;
+static auto& wsInit_ = AxPlug::GetWinsockInit();
 
 TcpClient::TcpClient() 
     : socket_(INVALID_SOCKET)
@@ -66,6 +53,7 @@ bool TcpClient::setSocketOptions() {
 }
 
 void TcpClient::setError(const std::string& error, int code) const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     lastError_ = error;
     errorCode_ = code;
 }
@@ -263,10 +251,12 @@ bool TcpClient::IsKeepAliveEnabled() const {
 }
 
 const char* TcpClient::GetLastError() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     return lastError_.c_str();
 }
 
 int TcpClient::GetErrorCode() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);  // Fix 2.9
     return errorCode_;
 }
 

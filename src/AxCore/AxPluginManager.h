@@ -3,6 +3,7 @@
 #include "AxPlug/IAxObject.h"
 #include "AxPlug/AxPluginExport.h"
 #include "AxPlug/AxException.h"
+#include "AxPlug/OSUtils.hpp"
 #include <string>
 #include <unordered_map>
 #include <map>
@@ -15,11 +16,11 @@ struct PluginModule {
     std::string filePath;
     std::string fileName;
     std::vector<AxPluginInfo> plugins;    // one or more plugins per DLL
-    void* handle;
+    AxPlug::LibraryHandle handle;
     bool isLoaded;
     std::string errorMessage;
 
-    PluginModule() : handle(nullptr), isLoaded(false) {}
+    PluginModule() : handle(AxPlug::LibraryHandle()), isLoaded(false) {}
 };
 
 // Flat index entry: maps a global plugin index to (module, plugin-within-module)
@@ -46,6 +47,9 @@ public:
     // Tool: create new instance (typeId-based, fast path)
     IAxObject* CreateObjectById(uint64_t typeId);
 
+    // Tool: create new instance by typeId + implementation name (named binding)
+    IAxObject* CreateObjectByIdNamed(uint64_t typeId, const char* implName);
+
     // Service: get or create named singleton (string-based, backward compat)
     IAxObject* GetSingleton(const char* interfaceName, const char* serviceName);
 
@@ -68,9 +72,7 @@ public:
     int GetPluginType(int index) const;
     bool IsPluginLoaded(int index) const;
 
-    // Error query
-    const char* GetLastError() const;
-    void ClearLastError();
+    // Error query (now routed through C API directly, see AxCoreDll.cpp)
 
 private:
     AxPluginManager();
@@ -83,8 +85,11 @@ private:
     // Internal: create object by typeId (caller must hold at least shared_lock)
     IAxObject* CreateObjectByIdInternal(uint64_t typeId);
 
-    // Plugin registry: typeId -> flat plugin index (O(1) lookup)
+    // Plugin registry: typeId -> flat plugin index (O(1) lookup, default impl)
     std::unordered_map<uint64_t, int> registry_;
+
+    // Named implementation registry: (typeId, implName) -> flat plugin index
+    std::map<std::pair<uint64_t, std::string>, int> namedImplRegistry_;
 
     // String-to-typeId fallback map (for backward compat string-based API)
     std::unordered_map<std::string, uint64_t> nameToTypeId_;
@@ -103,4 +108,7 @@ private:
 
     // Read-write lock: shared_lock for reads, unique_lock for writes
     mutable std::shared_mutex mutex_;
+
+    // Tracks directories already scanned to avoid redundant I/O
+    std::vector<std::string> scannedDirs_;
 };

@@ -41,6 +41,7 @@ private:
     std::condition_variable queueCondition_;
     std::thread logThread_;
     std::atomic<bool> stopFlag_;
+    std::mutex asyncStateMutex_;  // Fix 2.1: Protects EnableAsyncLogging Check-Then-Act
 
     std::string getCurrentTimestamp() const;
     std::string getLevelString(LogLevel level) const;
@@ -65,10 +66,10 @@ public:
     virtual void Error(const char* message) override;
     virtual void Critical(const char* message) override;
     
-    // 格式化日志方法
-    virtual void LogFormat(LogLevel level, const char* format, ...) override;
-    virtual void InfoFormat(const char* format, ...) override;
-    virtual void ErrorFormat(const char* format, ...) override;
+    // 格式化日志方法 (non-virtual, implementation-only convenience)
+    void LogFormat(LogLevel level, const char* format, ...);
+    void InfoFormat(const char* format, ...);
+    void ErrorFormat(const char* format, ...);
     
     // 配置方法
     virtual void SetLevel(LogLevel level) override;

@@ -10,8 +10,6 @@
 #include <unordered_set>
 
 class BoostUdpSocket : public IUdpSocket {
-    AX_INTERFACE(BoostUdpSocket)
-
 public:
     BoostUdpSocket();
     virtual ~BoostUdpSocket();

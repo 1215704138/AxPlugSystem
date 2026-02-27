@@ -26,10 +26,9 @@ public:
     virtual void Error(const char* message) = 0;
     virtual void Critical(const char* message) = 0;
     
-    // 格式化日志方法
-    virtual void LogFormat(LogLevel level, const char* format, ...) = 0;
-    virtual void InfoFormat(const char* format, ...) = 0;
-    virtual void ErrorFormat(const char* format, ...) = 0;
+    // Fix 1.16: Variadic methods removed from DLL interface (ABI unsafe).
+    // Use Log(level, preFormattedMessage) instead.
+    // Variadic convenience wrappers are provided in the implementation class.
     
     // 配置方法
     virtual void SetLevel(LogLevel level) = 0;

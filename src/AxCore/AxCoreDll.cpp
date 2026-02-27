@@ -1,5 +1,4 @@
 #include "AxPluginManager.h"
-#include "AxPlug/AxProfiler.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -17,6 +16,20 @@
 #endif
 
 // AxCore v3 - C export functions
+
+// Internal thread_local error storage — single canonical location for all DLLs
+namespace {
+    struct ThreadLocalError {
+        int code = 0;
+        std::string message;
+        std::string source;
+    };
+    ThreadLocalError& GetTLError() {
+        thread_local ThreadLocalError err;
+        return err;
+    }
+}
+
 extern "C" {
 
     // ========== Core API (backward compat) ==========
@@ -71,6 +84,10 @@ extern "C" {
         return AxPluginManager::Instance()->CreateObjectById(typeId);
     }
 
+    AX_CORE_API IAxObject* Ax_CreateObjectByIdNamed(uint64_t typeId, const char* implName) {
+        return AxPluginManager::Instance()->CreateObjectByIdNamed(typeId, implName);
+    }
+
     AX_CORE_API IAxObject* Ax_GetSingletonById(uint64_t typeId, const char* serviceName) {
         return AxPluginManager::Instance()->GetSingletonById(typeId, serviceName);
     }
@@ -80,23 +97,38 @@ extern "C" {
     }
 
     // ========== v3: Profiler API ==========
+    // Moved to AxProfiler.cpp (Fix 1.10: compiled into AxCore.dll)
 
-    AX_CORE_API void Ax_ProfilerBeginSession(const char* name, const char* filepath) {
-        AxProfiler::Instance().BeginSession(name, filepath);
+    // ========== v3: Error Handling API (canonical thread_local in AxCore.dll) ==========
+
+    AX_CORE_API void Ax_SetError(int code, const char* message, const char* source) {
+        auto& err = GetTLError();
+        err.code = code;
+        err.message = message ? message : "";
+        err.source = source ? source : "";
     }
 
-    AX_CORE_API void Ax_ProfilerEndSession() {
-        AxProfiler::Instance().EndSession();
+    AX_CORE_API int Ax_GetErrorCode() {
+        return GetTLError().code;
     }
-
-    // ========== v3: Error Handling API ==========
 
     AX_CORE_API const char* Ax_GetLastError() {
-        return AxPluginManager::Instance()->GetLastError();
+        return GetTLError().message.c_str();
+    }
+
+    AX_CORE_API const char* Ax_GetErrorSource() {
+        return GetTLError().source.c_str();
+    }
+
+    AX_CORE_API bool Ax_HasErrorState() {
+        return GetTLError().code != 0;
     }
 
     AX_CORE_API void Ax_ClearLastError() {
-        AxPluginManager::Instance()->ClearLastError();
+        auto& err = GetTLError();
+        err.code = 0;
+        err.message.clear();
+        err.source.clear();
     }
 
 } // extern "C"

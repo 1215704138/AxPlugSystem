@@ -1,5 +1,6 @@
 #include "AxPluginManager.h"
 #include "AxPlug/AxProfiler.h"
+#include "AxPlug/AxPluginExport.h"
 #include "AxPlug/OSUtils.hpp"
 #include <algorithm>
 #include <cstring>
@@ -158,6 +159,14 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
   auto registerPlugin = [&](const AxPluginInfo &info, int moduleIndex, int pluginIndex) {
     if (!info.interfaceName)
       return;
+    
+    // Check ABI version compatibility
+    if (info.abiVersion != AX_PLUGIN_ABI_VERSION) {
+      mod.errorMessage = "ABI version mismatch: plugin=" + std::to_string(info.abiVersion) + 
+                        ", expected=" + std::to_string(AX_PLUGIN_ABI_VERSION);
+      return;
+    }
+    
     std::string implName = (info.implName && info.implName[0] != '\0') ? info.implName : "";
     int flatIndex = static_cast<int>(allPlugins_.size());
     // Named impl registry: (typeId, implName) -> flatIndex

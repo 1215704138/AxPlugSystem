@@ -5,6 +5,9 @@
 // Plugin type
 enum class AxPluginType : int { Tool, Service };
 
+// Plugin ABI version - increase when breaking changes occur
+constexpr uint32_t AX_PLUGIN_ABI_VERSION = 1;
+
 // Plugin info structure - returned by each plugin DLL's entry point
 struct AxPluginInfo {
     const char* interfaceName;           // Interface type key, e.g. "IMath"
@@ -12,6 +15,7 @@ struct AxPluginInfo {
     AxPluginType type;                   // Tool or Service
     IAxObject* (*createFunc)();          // Object creation function pointer
     const char* implName;                // Implementation name tag, e.g. "boost", "" for default
+    uint32_t abiVersion;                 // ABI version for compatibility checking
 };
 
 // Plugin entry point names
@@ -43,7 +47,8 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
             InterfaceType::ax_type_id, \
             AxPluginType::Tool, \
             []() -> IAxObject* { return new TClass(); }, \
-            "" \
+            "", \
+            AX_PLUGIN_ABI_VERSION \
         }; \
         return info; \
     }
@@ -55,7 +60,8 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
             InterfaceType::ax_type_id, \
             AxPluginType::Tool, \
             []() -> IAxObject* { return new TClass(); }, \
-            ImplName \
+            ImplName, \
+            AX_PLUGIN_ABI_VERSION \
         }; \
         return info; \
     }
@@ -68,7 +74,8 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
             InterfaceType::ax_type_id, \
             AxPluginType::Service, \
             []() -> IAxObject* { return new TClass(); }, \
-            "" \
+            "", \
+            AX_PLUGIN_ABI_VERSION \
         }; \
         return info; \
     }
@@ -80,7 +87,8 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
             InterfaceType::ax_type_id, \
             AxPluginType::Service, \
             []() -> IAxObject* { return new TClass(); }, \
-            ImplName \
+            ImplName, \
+            AX_PLUGIN_ABI_VERSION \
         }; \
         return info; \
     }
@@ -95,16 +103,16 @@ using GetAxPluginsFunc = const AxPluginInfo*(*)(int*);
 //   AX_END_PLUGIN_MAP()
 
 #define AX_PLUGIN_TOOL(TClass, InterfaceType) \
-    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, "" },
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, "", AX_PLUGIN_ABI_VERSION },
 
 #define AX_PLUGIN_TOOL_NAMED(TClass, InterfaceType, ImplName) \
-    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, ImplName },
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, ImplName, AX_PLUGIN_ABI_VERSION },
 
 #define AX_PLUGIN_SERVICE(TClass, InterfaceType) \
-    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); }, "" },
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); }, "", AX_PLUGIN_ABI_VERSION },
 
 #define AX_PLUGIN_SERVICE_NAMED(TClass, InterfaceType, ImplName) \
-    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); }, ImplName },
+    { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Service, []() -> IAxObject* { return new TClass(); }, ImplName, AX_PLUGIN_ABI_VERSION },
 
 #define AX_BEGIN_PLUGIN_MAP() \
     extern "C" AX_PLUGIN_EXPORT const AxPluginInfo* GetAxPlugins(int* count) { \

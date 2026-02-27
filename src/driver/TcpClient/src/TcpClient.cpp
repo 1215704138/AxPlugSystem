@@ -91,19 +91,55 @@ bool TcpClient::Connect(const char* host, int port) {
     
     isConnecting_ = true;
     
-    if (connect(socket_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+    // 切换到非阻塞模式以支持连接超时
+    u_long iMode = 1;
+    ioctlsocket(socket_, FIONBIO, &iMode);
+    
+    int res = connect(socket_, (sockaddr*)&serverAddr, sizeof(serverAddr));
+    if (res == SOCKET_ERROR) {
         int error = WSAGetLastError();
-        if (error == WSAEWOULDBLOCK) {
-            // 非阻塞模式下的连接正在进行
-            return true;
+        if (error != WSAEWOULDBLOCK) {
+            setError("连接失败", error);
+            closesocket(socket_);
+            socket_ = INVALID_SOCKET;
+            isConnecting_ = false;
+            return false;
         }
-        
-        setError("连接失败", error);
-        closesocket(socket_);
-        socket_ = INVALID_SOCKET;
-        isConnecting_ = false;
-        return false;
+
+        fd_set writeFds, errFds;
+        FD_ZERO(&writeFds);
+        FD_ZERO(&errFds);
+        FD_SET(socket_, &writeFds);
+        FD_SET(socket_, &errFds);
+
+        timeval tv;
+        tv.tv_sec = timeout_ / 1000;
+        tv.tv_usec = (timeout_ % 1000) * 1000;
+
+        int selectRes = select(0, NULL, &writeFds, &errFds, timeout_ > 0 ? &tv : NULL);
+        if (selectRes <= 0) {
+            setError(selectRes == 0 ? "连接超时" : "select错误", WSAGetLastError());
+            closesocket(socket_);
+            socket_ = INVALID_SOCKET;
+            isConnecting_ = false;
+            return false;
+        }
+
+        if (FD_ISSET(socket_, &errFds)) {
+            int err = 0;
+            int len = sizeof(err);
+            getsockopt(socket_, SOL_SOCKET, SO_ERROR, (char*)&err, &len);
+            setError("连接被拒绝或错误", err);
+            closesocket(socket_);
+            socket_ = INVALID_SOCKET;
+            isConnecting_ = false;
+            return false;
+        }
     }
+    
+    // 连接成功，恢复阻塞模式
+    iMode = 0;
+    ioctlsocket(socket_, FIONBIO, &iMode);
     
     isConnected_ = true;
     isConnecting_ = false;

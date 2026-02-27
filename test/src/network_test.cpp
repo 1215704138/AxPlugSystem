@@ -288,6 +288,9 @@ void testNetworkPerformance() {
     return;
   }
 
+  // 缩短超时时间以避免测试过长
+  client->SetTimeout(10); // 10ms
+
   // 连接到本地回环地址（会失败，但可以测试连接性能）
   std::cout << "测试连接性能..." << std::endl;
   const int testCount = 100;

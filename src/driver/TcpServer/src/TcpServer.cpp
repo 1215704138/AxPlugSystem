@@ -242,7 +242,10 @@ void TcpServer::setError(const std::string& error, int code) const {
 
 void TcpServer::removeClient(TcpClientConnection* client) {
     std::lock_guard<std::mutex> lock(clientsMutex_);
-    auto it = std::find(clients_.begin(), clients_.end(), client);
+    auto it = std::find_if(clients_.begin(), clients_.end(),
+        [client](const std::shared_ptr<TcpClientConnection>& ptr) {
+            return ptr.get() == client;
+        });
     if (it != clients_.end()) {
         clients_.erase(it);
     }
@@ -254,14 +257,17 @@ void TcpServer::OnClientDisconnected(TcpClientConnection* client) {
     std::lock_guard<std::mutex> lock(clientsMutex_);
     
     // 安全查找并移除客户端，避免访问已删除对象
-    auto it = std::find(clients_.begin(), clients_.end(), client);
+    auto it = std::find_if(clients_.begin(), clients_.end(),
+        [client](const std::shared_ptr<TcpClientConnection>& ptr) {
+            return ptr.get() == client;
+        });
     if (it != clients_.end()) {
         clients_.erase(it);
     }
 }
 
 void TcpServer::CleanupInvalidClients() {
-    std::vector<TcpClientConnection*> toDelete;
+    std::vector<std::shared_ptr<TcpClientConnection>> toDelete;
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
         auto it = clients_.begin();
@@ -276,10 +282,12 @@ void TcpServer::CleanupInvalidClients() {
             }
         }
     }
-    for (auto* client : toDelete) {
-        client->server_ = nullptr;
-        client->Disconnect();
-        delete client;
+    for (auto& client : toDelete) {
+        if (client) {
+            client->server_ = nullptr;
+            client->Disconnect();
+            // shared_ptr will automatically delete when no longer referenced
+        }
     }
 }
 
@@ -370,32 +378,35 @@ ITcpClient* TcpServer::Accept() {
         }
     }
     
-    auto* client = new TcpClientConnection(clientSocket, this);
+    auto client = std::make_shared<TcpClientConnection>(clientSocket, this);
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
         clients_.push_back(client);
     }
     
-    return client;
+    return client.get();  // Return raw pointer for backward compatibility
 }
 
 ITcpClient* TcpServer::GetClient(int index) {
     std::lock_guard<std::mutex> lock(clientsMutex_);
     if (index >= 0 && index < static_cast<int>(clients_.size())) {
         // 检查客户端是否仍然有效且已连接
-        auto* client = clients_[index];
+        auto client = clients_[index];
         if (client && client->IsConnected()) {
-            return client;
+            return client.get();  // Return raw pointer, kept alive by shared_ptr
         }
     }
     return nullptr;
 }
 
 bool TcpServer::DisconnectClient(ITcpClient* client) {
-    TcpClientConnection* toDelete = nullptr;
+    std::shared_ptr<TcpClientConnection> toDelete;
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
-        auto it = std::find(clients_.begin(), clients_.end(), static_cast<TcpClientConnection*>(client));
+        auto it = std::find_if(clients_.begin(), clients_.end(),
+            [client](const std::shared_ptr<TcpClientConnection>& ptr) {
+                return ptr.get() == static_cast<TcpClientConnection*>(client);
+            });
         if (it != clients_.end()) {
             toDelete = *it;
             clients_.erase(it);
@@ -404,23 +415,23 @@ bool TcpServer::DisconnectClient(ITcpClient* client) {
     if (toDelete) {
         toDelete->server_ = nullptr;
         toDelete->Disconnect();
-        delete toDelete;
+        // shared_ptr will automatically delete when no longer referenced
         return true;
     }
     return false;
 }
 
 bool TcpServer::DisconnectAllClients() {
-    std::vector<TcpClientConnection*> toDelete;
+    std::vector<std::shared_ptr<TcpClientConnection>> toDelete;
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
         toDelete.swap(clients_);
     }
-    for (auto* client : toDelete) {
+    for (auto& client : toDelete) {
         if (client) {
             client->server_ = nullptr;
             client->Disconnect();
-            delete client;
+            // shared_ptr will automatically delete when no longer referenced
         }
     }
     return true;
@@ -446,7 +457,7 @@ int TcpServer::GetConnectedCount() const {
     std::lock_guard<std::mutex> lock(clientsMutex_);
     
     int count = 0;
-    for (auto* client : clients_) {
+    for (const auto& client : clients_) {
         if (client && client->IsConnected()) {
             count++;
         }

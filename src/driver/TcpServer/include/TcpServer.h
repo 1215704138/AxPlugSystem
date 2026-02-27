@@ -8,6 +8,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <memory>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -87,7 +88,7 @@ private:
     bool reuseAddress_;
     std::string listenAddr_;
     int listenPort_;
-    std::vector<TcpClientConnection*> clients_;  // Fix 3.12: removed unnecessary mutable
+    std::vector<std::shared_ptr<TcpClientConnection>> clients_;  // Fix: Use shared_ptr to prevent dangling pointers
     mutable std::mutex errorMutex_;  // Fix 2.9: protect lastError_/errorCode_
     mutable std::string lastError_;
     mutable int errorCode_;

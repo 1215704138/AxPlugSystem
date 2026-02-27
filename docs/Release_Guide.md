@@ -75,7 +75,7 @@ add_library(MyNewPlugin SHARED src/MyPlugin.cpp)
 target_link_directories(MyNewPlugin PRIVATE ${AXPLUG_SDK_DIR}/lib)
 
 # 5. 链接核心库 
-# 注意：v3 架构重构后，无论是开发插件 DLL 还是宿主程序(exe)都必须链接 AxCore 
+# 注意：无论是开发插件 DLL 还是宿主程序(exe)都必须链接 AxCore 
 # （为了保证异常状态 AxError 和 性能采样 AxProfiler 的 TLS 状态跨 DLL 一致性）。
 target_link_libraries(MyNewPlugin PRIVATE AxCore)
 

@@ -109,7 +109,7 @@ int main() {
     auto* logger = AxPlug::GetService<ILoggerService>("main");
     logger->Info("程序启动");
 
-    // v3: 使用智能指针 Tool（RAII 自动释放）
+    // 使用智能指针 Tool（RAII 自动释放）
     {
         auto math = AxPlug::CreateTool<IMath>();  // 返回 AxPtr<IMath>
         int result = math->Add(10, 20);
@@ -684,7 +684,7 @@ if (!obj) {
 ### 15.4 多线程并发
 
 ```cpp
-// v3 使用 shared_mutex 读写锁，多线程安全
+// 使用 shared_mutex 读写锁，多线程安全
 // 读操作（GetService 命中缓存）并发无锁竞争
 std::vector<std::thread> threads;
 for (int i = 0; i < 8; i++) {

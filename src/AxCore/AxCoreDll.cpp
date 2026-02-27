@@ -15,7 +15,7 @@
     #endif
 #endif
 
-// AxCore v3 - C export functions
+// AxCore - C export functions
 
 // Internal thread_local error storage — single canonical location for all DLLs
 namespace {
@@ -32,7 +32,7 @@ namespace {
 
 extern "C" {
 
-    // ========== Core API (backward compat) ==========
+    // ========== Initialization API ==========
 
     AX_CORE_API void Ax_Init(const char* pluginDir) {
         AxPluginManager::Instance()->Init(pluginDir);
@@ -78,7 +78,7 @@ extern "C" {
         return AxPluginManager::Instance()->IsPluginLoaded(index);
     }
 
-    // ========== v3: TypeId Fast Path API ==========
+    // ========== TypeId Fast Path API ==========
 
     AX_CORE_API IAxObject* Ax_CreateObjectById(uint64_t typeId) {
         return AxPluginManager::Instance()->CreateObjectById(typeId);
@@ -96,10 +96,16 @@ extern "C" {
         AxPluginManager::Instance()->ReleaseSingletonById(typeId, serviceName);
     }
 
-    // ========== v3: Profiler API ==========
-    // Moved to AxProfiler.cpp (Fix 1.10: compiled into AxCore.dll)
+    // ========== Introspection API ==========
 
-    // ========== v3: Error Handling API (canonical thread_local in AxCore.dll) ==========
+    AX_CORE_API int Ax_FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount) {
+        return AxPluginManager::Instance()->FindPluginsByTypeId(typeId, outIndices, maxCount);
+    }
+
+    // ========== Profiler API ==========
+    // Implemented in AxProfiler.cpp (compiled into AxCore.dll)
+
+    // ========== Error Handling API (canonical thread_local in AxCore.dll) ==========
 
     AX_CORE_API void Ax_SetError(int code, const char* message, const char* source) {
         auto& err = GetTLError();

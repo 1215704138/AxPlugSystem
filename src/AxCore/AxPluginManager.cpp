@@ -19,14 +19,8 @@ namespace fs = std::filesystem;
 AxPluginManager::AxPluginManager() {}
 
 AxPluginManager::~AxPluginManager() {
-  std::unique_lock<std::shared_mutex> lock(mutex_);
-
-  // Release all cached singletons (shared_ptr handles Destroy via custom
-  // deleter)
-  defaultSingletons_.clear();
-  namedSingletons_.clear();
-  namedImplRegistry_.clear();
-
+  ReleaseAllSingletons();
+  
   // Fix 1.4: DLLs are intentionally NOT unloaded here.
   // Tool objects created via CreateObject may still be alive with raw pointers
   // into DLL code. Calling FreeLibrary would crash their virtual destructors.
@@ -130,14 +124,13 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
 
   mod.handle = handle;
 
-  // Resolve entry points outside lock
-  auto multiFunc = (GetAxPluginsFunc)AxPlug::OSUtils::GetSymbol(handle, AX_PLUGINS_ENTRY_POINT);
-  auto singleFunc = (GetAxPluginFunc)AxPlug::OSUtils::GetSymbol(handle, AX_PLUGIN_ENTRY_POINT);
+  // Resolve entry point outside lock
+  auto entryFunc = (GetAxPluginsFunc)AxPlug::OSUtils::GetSymbol(handle, AX_PLUGINS_ENTRY_POINT);
 
   int pluginCount = 0;
   const AxPluginInfo *plugins = nullptr;
-  if (multiFunc) {
-    plugins = multiFunc(&pluginCount);
+  if (entryFunc) {
+    plugins = entryFunc(&pluginCount);
   }
 
   // Fix 2.11: Phase 4 — Register under unique_lock (write path)
@@ -182,33 +175,23 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
     nameToTypeId_[info.interfaceName] = info.typeId;
   };
 
-  if (plugins && pluginCount > 0) {
-    for (int i = 0; i < pluginCount; i++) {
-      mod.plugins.push_back(plugins[i]);
-    }
-    mod.isLoaded = true;
-    mod.errorMessage = "OK";
-    int moduleIndex = static_cast<int>(modules_.size());
-    for (int i = 0; i < pluginCount; i++) {
-      registerPlugin(mod.plugins[i], moduleIndex, i);
-    }
-    modules_.push_back(std::move(mod));
-    return;
-  }
-
-  if (!singleFunc) {
-    mod.errorMessage = "Missing GetAxPlugin/GetAxPlugins entry point";
+  if (!plugins || pluginCount <= 0) {
+    mod.errorMessage = "Missing GetAxPlugins entry point";
     AxPlug::OSUtils::UnloadLibrary(handle);
     mod.handle = AxPlug::LibraryHandle();
     modules_.push_back(std::move(mod));
     return;
   }
 
-  mod.plugins.push_back(singleFunc());
+  for (int i = 0; i < pluginCount; i++) {
+    mod.plugins.push_back(plugins[i]);
+  }
   mod.isLoaded = true;
   mod.errorMessage = "OK";
   int moduleIndex = static_cast<int>(modules_.size());
-  registerPlugin(mod.plugins[0], moduleIndex, 0);
+  for (int i = 0; i < pluginCount; i++) {
+    registerPlugin(mod.plugins[i], moduleIndex, i);
+  }
   modules_.push_back(std::move(mod));
 }
 
@@ -348,56 +331,70 @@ IAxObject *AxPluginManager::GetSingletonById(uint64_t typeId,
         std::string name = serviceName ? serviceName : "";
         bool isDefault = name.empty();
 
-        // Fast path: read-only check for existing singleton (shared_lock)
+        // Find or create holder
+        SingletonHolder* holder = nullptr;
         {
           std::shared_lock<std::shared_mutex> lock(mutex_);
           if (isDefault) {
-            auto it = defaultSingletons_.find(typeId);
-            if (it != defaultSingletons_.end())
-              return it->second.get();
+            auto it = defaultSingletonHolders_.find(typeId);
+            if (it != defaultSingletonHolders_.end())
+              holder = &it->second;
           } else {
             auto key = std::make_pair(typeId, name);
-            auto it = namedSingletons_.find(key);
-            if (it != namedSingletons_.end())
-              return it->second.get();
+            auto it = namedSingletonHolders_.find(key);
+            if (it != namedSingletonHolders_.end())
+              holder = &it->second;
           }
         }
 
-        // Slow path: need to create (unique_lock)
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-
-        // Double-check after acquiring write lock
-        if (isDefault) {
-          auto it = defaultSingletons_.find(typeId);
-          if (it != defaultSingletons_.end())
-            return it->second.get();
-        } else {
-          auto key = std::make_pair(typeId, name);
-          auto it = namedSingletons_.find(key);
-          if (it != namedSingletons_.end())
-            return it->second.get();
+        if (!holder) {
+          std::unique_lock<std::shared_mutex> lock(mutex_);
+          // Double-check after acquiring write lock
+          if (isDefault) {
+            auto it = defaultSingletonHolders_.find(typeId);
+            if (it != defaultSingletonHolders_.end())
+              holder = &it->second;
+            else
+              holder = &defaultSingletonHolders_[typeId];
+          } else {
+            auto key = std::make_pair(typeId, name);
+            auto it = namedSingletonHolders_.find(key);
+            if (it != namedSingletonHolders_.end())
+              holder = &it->second;
+            else
+              holder = &namedSingletonHolders_[key];
+          }
         }
 
-        // Create new instance
-        IAxObject *raw = CreateObjectByIdInternal(typeId);
-        if (!raw)
-          return nullptr;
-
-        // Wrap in shared_ptr with custom deleter that calls Destroy()
-        auto sp = std::shared_ptr<IAxObject>(raw, [](IAxObject *p) {
-          if (p)
-            p->Destroy();
+        // Use std::call_once for lock-free initialization
+        std::call_once(holder->flag, [this, holder, typeId, isDefault, name]() {
+          try {
+            // 在 call_once 内部需要持有锁来调用 CreateObjectByIdInternal
+            std::shared_lock<std::shared_mutex> create_lock(mutex_);
+            holder->instance = CreateObjectByIdInternal(typeId);
+            create_lock.unlock();
+            
+            if (!holder->instance)
+              throw std::runtime_error("Factory returned nullptr");
+            
+            // 添加到关闭栈
+            std::unique_lock<std::shared_mutex> stack_lock(mutex_);
+            shutdownStack_.push_back(std::shared_ptr<IAxObject>(holder->instance, [](IAxObject* p) { if (p) p->Destroy(); }));
+            stack_lock.unlock();
+            
+            // 调用初始化钩子
+            holder->instance->OnInit();
+          } catch (...) {
+            holder->e_ptr = std::current_exception();
+            holder->instance = nullptr;
+          }
         });
 
-        IAxObject *result = sp.get();
+        // If construction failed, rethrow cached exception
+        if (holder->e_ptr)
+          std::rethrow_exception(holder->e_ptr);
 
-        if (isDefault) {
-          defaultSingletons_[typeId] = std::move(sp);
-        } else {
-          namedSingletons_[std::make_pair(typeId, name)] = std::move(sp);
-        }
-
-        return result;
+        return holder->instance;
       },
       "Ax_GetSingletonById");
 }
@@ -432,11 +429,35 @@ void AxPluginManager::ReleaseSingletonById(uint64_t typeId,
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
         std::string name = serviceName ? serviceName : "";
+        
+        // 从关闭栈中移除对应的对象
         if (name.empty()) {
-          // shared_ptr destructor calls Destroy() via custom deleter
-          defaultSingletons_.erase(typeId);
+          auto it = defaultSingletonHolders_.find(typeId);
+          if (it != defaultSingletonHolders_.end() && it->second.instance) {
+            // 从 shutdownStack_ 中移除对应的 shared_ptr
+            shutdownStack_.erase(
+              std::remove_if(shutdownStack_.begin(), shutdownStack_.end(),
+                [instance = it->second.instance](const std::shared_ptr<IAxObject>& ptr) {
+                  return ptr.get() == instance;
+                }),
+              shutdownStack_.end()
+            );
+          }
+          defaultSingletonHolders_.erase(typeId);
         } else {
-          namedSingletons_.erase(std::make_pair(typeId, name));
+          auto key = std::make_pair(typeId, name);
+          auto it = namedSingletonHolders_.find(key);
+          if (it != namedSingletonHolders_.end() && it->second.instance) {
+            // 从 shutdownStack_ 中移除对应的 shared_ptr
+            shutdownStack_.erase(
+              std::remove_if(shutdownStack_.begin(), shutdownStack_.end(),
+                [instance = it->second.instance](const std::shared_ptr<IAxObject>& ptr) {
+                  return ptr.get() == instance;
+                }),
+              shutdownStack_.end()
+            );
+          }
+          namedSingletonHolders_.erase(key);
         }
       },
       "Ax_ReleaseSingletonById");
@@ -484,5 +505,50 @@ bool AxPluginManager::IsPluginLoaded(int index) const {
   if (index < 0 || index >= static_cast<int>(allPlugins_.size()))
     return false;
   return modules_[allPlugins_[index].moduleIndex].isLoaded;
+}
+
+int AxPluginManager::FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount) {
+  if (!outIndices || maxCount <= 0) return 0;
+  
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  int found = 0;
+  
+  for (int i = 0; i < static_cast<int>(allPlugins_.size()) && found < maxCount; ++i) {
+    const auto& entry = allPlugins_[i];
+    const auto& mod = modules_[entry.moduleIndex];
+    if (entry.pluginIndex < static_cast<int>(mod.plugins.size())) {
+      const auto& plugin = mod.plugins[entry.pluginIndex];
+      if (plugin.typeId == typeId) {
+        outIndices[found++] = i;
+      }
+    }
+  }
+  
+  return found;
+}
+
+void AxPluginManager::ReleaseAllSingletons() {
+  // 1. 拷贝关闭栈并释放锁，避免在 OnShutdown 中死锁
+  std::vector<std::shared_ptr<IAxObject>> stackCopy;
+  {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    stackCopy = shutdownStack_;
+    shutdownStack_.clear();
+    defaultSingletonHolders_.clear();
+    namedSingletonHolders_.clear();
+    namedImplRegistry_.clear();
+  }
+
+  // 2. 逆序通知 OnShutdown（不持有锁）
+  for(auto it = stackCopy.rbegin(); it != stackCopy.rend(); ++it) {
+    if (*it) {
+        (*it)->OnShutdown();
+    }
+  }
+  
+  // 3. 逆序重置智能指针触发析构
+  for(auto it = stackCopy.rbegin(); it != stackCopy.rend(); ++it) {
+    it->reset(); 
+  }
 }
 

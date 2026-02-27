@@ -10,6 +10,8 @@
 #include <vector>
 #include <shared_mutex>
 #include <memory>
+#include <mutex>
+#include <algorithm>
 
 // Internal plugin module info (one per DLL)
 struct PluginModule {
@@ -23,6 +25,13 @@ struct PluginModule {
     PluginModule() : handle(AxPlug::LibraryHandle()), isLoaded(false) {}
 };
 
+// Singleton holder for lock-free initialization
+struct SingletonHolder {
+    std::once_flag   flag;       // 保证只执行一次
+    IAxObject*       instance = nullptr;
+    std::exception_ptr e_ptr;     // 构造失败时缓存异常
+};
+
 // Flat index entry: maps a global plugin index to (module, plugin-within-module)
 struct PluginEntry {
     int moduleIndex;
@@ -30,7 +39,6 @@ struct PluginEntry {
 };
 
 // Plugin manager - singleton, manages all plugin loading and lifecycle
-// v3: shared_mutex (read-write lock), typeId-based hot path, shared_ptr cache, exception handling
 class AxPluginManager {
 public:
     static AxPluginManager* Instance();
@@ -41,19 +49,19 @@ public:
     // Load all plugin DLLs from directory
     void LoadPlugins(const char* directory);
 
-    // Tool: create new instance each time (string-based, backward compat)
+    // Tool: create new instance each time (string-based)
     IAxObject* CreateObject(const char* interfaceName);
 
-    // Tool: create new instance (typeId-based, fast path)
+    // Tool: create new instance (typeId-based)
     IAxObject* CreateObjectById(uint64_t typeId);
 
     // Tool: create new instance by typeId + implementation name (named binding)
     IAxObject* CreateObjectByIdNamed(uint64_t typeId, const char* implName);
 
-    // Service: get or create named singleton (string-based, backward compat)
+    // Service: get or create named singleton (string-based)
     IAxObject* GetSingleton(const char* interfaceName, const char* serviceName);
 
-    // Service: get or create named singleton (typeId-based, fast path)
+    // Service: get or create named singleton (typeId-based)
     IAxObject* GetSingletonById(uint64_t typeId, const char* serviceName);
 
     // Release named singleton (string-based)
@@ -71,6 +79,9 @@ public:
     const char* GetPluginFileName(int index) const;
     int GetPluginType(int index) const;
     bool IsPluginLoaded(int index) const;
+
+    // Introspection API
+    int FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount);
 
     // Error query (now routed through C API directly, see AxCoreDll.cpp)
 
@@ -91,7 +102,7 @@ private:
     // Named implementation registry: (typeId, implName) -> flat plugin index
     std::map<std::pair<uint64_t, std::string>, int> namedImplRegistry_;
 
-    // String-to-typeId fallback map (for backward compat string-based API)
+    // String-to-typeId map (for string-based API)
     std::unordered_map<std::string, uint64_t> nameToTypeId_;
 
     // All loaded modules (one per DLL)
@@ -100,15 +111,21 @@ private:
     // Flat plugin list for query API
     std::vector<PluginEntry> allPlugins_;
 
-    // Service singleton cache: typeId -> shared_ptr (default/unnamed singletons, hot path)
-    std::unordered_map<uint64_t, std::shared_ptr<IAxObject>> defaultSingletons_;
+    // Service singleton cache: typeId -> SingletonHolder (default/unnamed singletons, hot path)
+    std::unordered_map<uint64_t, SingletonHolder> defaultSingletonHolders_;
 
-    // Named service singleton cache: (typeId, name) -> shared_ptr
-    std::map<std::pair<uint64_t, std::string>, std::shared_ptr<IAxObject>> namedSingletons_;
+    // Named service singleton cache: (typeId, name) -> SingletonHolder
+    std::map<std::pair<uint64_t, std::string>, SingletonHolder> namedSingletonHolders_;
+
+    // LIFO shutdown stack: tracks singleton creation order for safe reverse teardown
+    std::vector<std::shared_ptr<IAxObject>> shutdownStack_;
 
     // Read-write lock: shared_lock for reads, unique_lock for writes
     mutable std::shared_mutex mutex_;
 
     // Tracks directories already scanned to avoid redundant I/O
     std::vector<std::string> scannedDirs_;
+
+    // Release all singletons in reverse creation order
+    void ReleaseAllSingletons();
 };

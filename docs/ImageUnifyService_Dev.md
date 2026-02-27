@@ -1,6 +1,6 @@
 # ImageUnifyService 开发者维护手册
 
-> 当前功能说明 | 最后更新: 2026-02-27
+> v1.0 | 开发者维护手册
 
 ---
 
@@ -44,7 +44,7 @@
 | `include/core/UnifyToQt.hpp` | 向后兼容重定向(→Unify.hpp) | 7 |
 | `src/.../include/ImageUnifyService.h` | 内部数据结构 + AlignedMemoryPool | ~148 |
 | `src/.../src/ImageUnifyService.cpp` | 服务实现 + 6项优化 | ~628 |
-| `src/.../src/module.cpp` | 插件导出宏 | 5 |
+| `src/.../src/module.cpp` | 插件导出宏 | 7 |
 | `test/image_unify_test.cpp` | 11个测试用例 | ~1000+ |
 
 ### 1.2 核心设计决策

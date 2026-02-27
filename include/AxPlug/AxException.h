@@ -102,3 +102,11 @@ namespace AxErrorCode {
     constexpr int InvalidArgument = 103;
     constexpr int ServiceNotFound = 104;
 }
+
+// Instance error codes for Try-Get API
+enum class AxInstanceError : uint32_t {
+    kSuccess = 0,
+    kErrorNotFound = 1,
+    kErrorVersionMismatch = 2,
+    kErrorInternal = 3
+};

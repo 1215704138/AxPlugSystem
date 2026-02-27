@@ -94,6 +94,19 @@ public:
     virtual void EnableAsyncLogging(bool enable) override;
     virtual bool IsAsyncLoggingEnabled() const override;
     
+    // 生命周期钩子
+    virtual void OnInit() override {
+        // 初始化异步日志系统（如果需要）
+    }
+    
+    virtual void OnShutdown() override {
+        // 停止异步日志系统，确保所有日志都被写入
+        Flush();
+        if (logThread_.joinable()) {
+            logThread_.join();
+        }
+    }
+    
 protected:
     void Destroy() override { delete this; }
 };

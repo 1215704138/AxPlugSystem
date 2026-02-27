@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -251,6 +252,33 @@ public:
     std::error_code ec;
     fs::path path(filePath);
     return path.filename().string();
+  }
+
+  /**
+   * @brief 跨平台原子文件写入
+   * @param targetPath 目标文件路径
+   * @param content 要写入的内容
+   * @return 是否成功
+   */
+  static bool AtomicWriteFile(const std::string& targetPath, const std::string& content) {
+    std::string tmpPath = targetPath + ".tmp";
+    
+    // 1. 写入临时文件
+    {
+      std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+      if (!out.is_open()) return false;
+      out.write(content.data(), content.size());
+      out.flush();
+    }
+    
+#ifdef _WIN32
+    // 2. Windows: 原子重命名（允许覆盖）
+    return ::MoveFileExA(tmpPath.c_str(), targetPath.c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    // 2. POSIX: rename 是 POSIX 原子操作
+    return std::rename(tmpPath.c_str(), targetPath.c_str()) == 0;
+#endif
   }
 
 private:

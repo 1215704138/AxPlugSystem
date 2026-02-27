@@ -48,6 +48,12 @@ private:
 class IAxObject {
 public:
     virtual ~IAxObject() = default;
+    
+    // 初始化钩子，系统完成对象的实例化与映射表存入后调用
+    virtual void OnInit() {}
+    
+    // 提给子类重写的安全谢幕钩子，由管理器在析构之前主动调用
+    virtual void OnShutdown() {}
 
 protected:
     // Self-destruct interface, only AxPluginManager can call

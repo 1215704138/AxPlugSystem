@@ -14,6 +14,7 @@ EXPORTS
     Ax_CreateObjectByIdNamed
     Ax_GetSingletonById
     Ax_ReleaseSingletonById
+    Ax_FindPluginsByTypeId
     Ax_ProfilerBeginSession
     Ax_ProfilerEndSession
     Ax_ProfilerWriteProfile

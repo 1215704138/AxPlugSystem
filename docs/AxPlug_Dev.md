@@ -1,4 +1,4 @@
-# AxPlug 插件框架 · 开发与维护手册
+# AxPlug 插件框架 · 开发与维护手册 v1.0
 
 本文档面向框架本身的开发者和维护者，描述 AxPlug 的内部架构、源码结构、构建系统和扩展方法。
 
@@ -18,19 +18,18 @@
 10. [跨平台支持](#10-跨平台支持)
 11. [调试与排障](#11-调试与排障)
 12. [扩展框架的注意事项](#12-扩展框架的注意事项)
-13. [核心特性说明](#13-核心特性说明)
 
 ---
 
 ## 1. 源码结构
 
 ```
-AxPlug/
+AxPlugSystem/
 ├── include/                         公共头文件（对外暴露）
 │   ├── AxPlug/
 │   │   ├── AxPlug.h                 用户唯一入口头文件（inline 模板 API）
 │   │   ├── IAxObject.h              基类 + AX_INTERFACE 宏 + FNV-1a typeId + AxPtr<T>
-│   │   ├── AxPluginExport.h         导出宏 AX_EXPORT_TOOL / AX_EXPORT_SERVICE / _NAMED 变体
+│   │   ├── AxPluginExport.h         导出宏 AX_BEGIN_PLUGIN_MAP / AX_PLUGIN_TOOL / AX_PLUGIN_SERVICE
 │   │   ├── AxProfiler.h             内置性能分析器（Chrome trace.json，流式写入）
 │   │   ├── AxException.h            跨 DLL 异常处理 + 错误 C API（路由到 AxCore thread_local）
 │   │   └── OSUtils.hpp              跨平台动态库工具（header-only）
@@ -50,7 +49,8 @@ AxPlug/
 │   └── driver/                      驱动插件实现
 │
 ├── test/                            测试程序
-├── deps/                            第三方依赖
+├── deps/                            第三方依赖（spdlog, boost）
+├── scripts/                         构建脚本
 ├── docs/                            文档
 └── CMakeLists.txt                   根构建文件
 ```
@@ -125,9 +125,11 @@ class AxPluginManager {
     std::unordered_map<std::string, uint64_t> nameToTypeId_;        // 接口名 → typeId (兼容层)
     std::vector<PluginModule> modules_;                             // 所有已加载模块
     std::vector<PluginEntry> allPlugins_;                           // 扁平插件列表
-    // shared_ptr 管理 Service 生命周期（RAII 自动释放）
-    std::unordered_map<uint64_t, std::shared_ptr<IAxObject>> defaultSingletons_;
-    std::map<std::pair<uint64_t, std::string>, std::shared_ptr<IAxObject>> namedSingletons_;
+    // std::call_once 管理 Service 单例初始化
+    std::unordered_map<uint64_t, SingletonHolder> defaultSingletonHolders_;
+    std::map<std::pair<uint64_t, std::string>, SingletonHolder> namedSingletonHolders_;
+    // LIFO 关闭栈：逆序调用 OnShutdown + Destroy
+    std::vector<std::shared_ptr<IAxObject>> shutdownStack_;
     // shared_mutex 读写锁
     mutable std::shared_mutex mutex_;
     // 重复目录保护
@@ -151,6 +153,7 @@ struct AxPluginInfo {
     AxPluginType type;                   // Tool 或 Service（底层类型为 int）
     IAxObject* (*createFunc)();          // 工厂函数
     const char* implName;                // 命名实现标签，如 "boost"，默认为 ""
+    uint32_t abiVersion;                 // ABI 版本号
 };
 ```
 
@@ -168,37 +171,41 @@ struct AxPluginInfo {
 #define AX_INTERFACE(InterfaceName) \
 public: \
     static constexpr const char* ax_interface_name = #InterfaceName; \
+    static constexpr uint64_t ax_type_id = AxTypeHash(#InterfaceName); \
 private:
 
 class IAxObject {
 public:
     virtual ~IAxObject() = default;
+    virtual void OnInit() {}       // 系统完成实例化后调用
+    virtual void OnShutdown() {}   // 管理器析构前调用
 protected:
-    virtual void Destroy() = 0;      // 仅框架内部调用
+    virtual void Destroy() = 0;    // 仅框架内部调用
     friend class AxPluginManager;
 };
 ```
 
-- `AX_INTERFACE` 将类名转为编译期字符串字面量，保证跨 DLL 一致
+- `AX_INTERFACE` 同时生成 `ax_interface_name` (string) 和 `ax_type_id` (uint64_t FNV-1a hash)
 - `Destroy()` 由 `AxPluginManager::ReleaseObject` 调用，用户侧不可见
+- `OnInit()` / `OnShutdown()` 为 Service 插件提供生命周期钩子
 
 ### 3.2 AxPluginExport.h
 
-定义插件导出宏：
+定义插件导出宏（声明式，支持单插件和多插件 DLL）：
 
 ```cpp
-// AX_EXPORT_TOOL(TClass, InterfaceType) 展开为：
-extern "C" AX_PLUGIN_EXPORT AxPluginInfo GetAxPlugin() {
-    static AxPluginInfo info = {
-        InterfaceType::ax_interface_name,             // 编译期接口名
-        AxPluginType::Tool,                           // 插件类型
-        []() -> IAxObject* { return new TClass(); }   // 工厂函数
+// AX_BEGIN_PLUGIN_MAP() / AX_END_PLUGIN_MAP() 展开为：
+extern "C" AX_PLUGIN_EXPORT const AxPluginInfo* GetAxPlugins(int* count) {
+    static const AxPluginInfo plugins[] = {
+        { InterfaceType::ax_interface_name, InterfaceType::ax_type_id, AxPluginType::Tool, []() -> IAxObject* { return new TClass(); }, "", AX_PLUGIN_ABI_VERSION },
+        // ...
     };
-    return info;
+    if (count) *count = sizeof(plugins) / sizeof(plugins[0]);
+    return plugins;
 }
 ```
 
-`AX_EXPORT_SERVICE` 同理，仅 `AxPluginType::Service`。
+宏包括：`AX_PLUGIN_TOOL`、`AX_PLUGIN_TOOL_NAMED`、`AX_PLUGIN_SERVICE`、`AX_PLUGIN_SERVICE_NAMED`。
 
 ### 3.3 AxPlug.h
 
@@ -208,7 +215,7 @@ extern "C" AX_PLUGIN_EXPORT AxPluginInfo GetAxPlugin() {
 - `AxPlug::` 命名空间内的 inline 模板函数
 - `AX_HOST_INIT()` 便捷宏
 
-**重要**：所有模板函数（`CreateTool<T>`, `GetService<T>`, `ReleaseService<T>`）都通过 `T::ax_interface_name` 取得编译期接口名字符串，再调用对应 C 导出函数。
+**重要**：所有模板函数（`CreateTool<T>`, `GetService<T>`, `ReleaseService<T>`）都通过 `T::ax_type_id` 取得编译期 typeId（FNV-1a hash），再调用对应 typeId C 导出函数（O(1) 查找）。
 
 ### 3.4 OSUtils.hpp
 
@@ -239,7 +246,7 @@ AxPlug::Init(dir)
                  │
                  ├─ 路径规范化 + shared_lock 去重检查
                  ├─ OSUtils::LoadLibrary(path)         加载 DLL（锁外）
-                 ├─ GetAxPlugins / GetAxPlugin          获取插件信息
+                 ├─ GetAxPlugins                         获取插件信息
                  ├─ unique_lock TOCTOU 重检
                  └─ registerPlugin → registry_ + namedImplRegistry_
 ```
@@ -282,25 +289,27 @@ DestroyTool(ptr)
 
 ```
 GetService<T>(name)
-  → Ax_GetSingletonById(T::ax_type_id, name)   ← typeId O(1) 快速查找
+  → Ax_GetSingletonById(T::ax_type_id, name)
   → AxPluginManager::GetSingletonById()
-  → [Fast Path] shared_lock 查找 defaultSingletons_/namedSingletons_
-  → 命中则直接返回 shared_ptr.get()
-  → [Slow Path] unique_lock 双检锁创建
-  → CreateObjectByIdInternal() + 包装为 shared_ptr (自定义 deleter 调用 Destroy())
-  → 存入缓存
+  → [Fast Path] shared_lock 查找 SingletonHolder
+  → 命中且已初始化则直接返回 instance
+  → [Slow Path] unique_lock 创建 SingletonHolder
+  → std::call_once: CreateObjectByIdInternal() + 推入 shutdownStack_
+  → 调用 OnInit() 钩子
+  → 返回 instance
 
 ReleaseService<T>(name)
   → Ax_ReleaseSingletonById(T::ax_type_id, name)
-  → unique_lock → erase 缓存条目 → shared_ptr 析构 → Destroy()
+  → unique_lock → 从 shutdownStack_ 移除 → erase holder
 ```
 
 ### 5.4 框架退出时
 
-`AxPluginManager` 析构函数按以下顺序清理：
-1. 清空 `defaultSingletons_` 和 `namedSingletons_`（shared_ptr 析构自动调用 `Destroy()`）
-2. 清空 `namedImplRegistry_`
-3. 清空模块列表和注册表（DLL 不显式卸载，OS 在进程退出时回收）
+`AxPluginManager` 析构函数调用 `ReleaseAllSingletons()`：
+1. 拷贝 `shutdownStack_` 并释放锁（防止 OnShutdown 中死锁）
+2. 逆序调用所有单例的 `OnShutdown()`
+3. 逆序重置 `shared_ptr` 触发 `Destroy()`
+4. 清空模块列表和注册表（DLL 不显式卸载，OS 在进程退出时回收）
 
 ---
 
@@ -444,10 +453,10 @@ auto registerPlugin = [&](const AxPluginInfo& info, int moduleIndex, int pluginI
 #### 8.2.3 LoadOnePlugin 流程
 
 1. 锁外规范化路径 + shared_lock 去重检查
-2. 锁外加载 DLL + 解析入口点
+2. 锁外加载 DLL + 解析 `GetAxPlugins` 入口点
 3. unique_lock TOCTOU 重检查
-4. 优先尝试 `GetAxPlugins`（多插件），回退到 `GetAxPlugin`（单插件）
-5. 通过 `registerPlugin` lambda 注册到 `registry_` 和 `namedImplRegistry_`
+4. 调用 `GetAxPlugins` 获取插件信息数组
+5. 通过 `registerPlugin` lambda 注册到 `registry_` 和 `namedImplRegistry_`（含 ABI 版本检查）
 
 ### 8.3 查询 API 扁平化
 
@@ -466,19 +475,26 @@ for (int i = 0; i < count; i++) {
 }
 ```
 
-### 8.4 向后兼容性保证
+### 8.4 查询 API 扁平化
 
-- **现有单插件 DLL**：继续使用 `AX_EXPORT_TOOL` / `AX_EXPORT_SERVICE`，无需修改
-- **用户侧 API**：`CreateTool<T>()` / `GetService<T>()` 完全不变
-- **C 导出符号**：保持不变，ABI 兼容
-- **查询 API**：接口不变，只是索引含义从"模块索引"变为"插件索引"
+查询 API 返回每个插件的独立索引（多插件 DLL 占多个索引）：
+
+```cpp
+int count = AxPlug::GetPluginCount();
+for (int i = 0; i < count; i++) {
+    auto info = AxPlug::GetPluginInfo(i);
+    // i=0: IMath (MathPlugin.dll)
+    // i=1: ITcpClient (TcpClientPlugin.dll)
+    // i=2: ITcpClient/boost (TcpClientPlugin.dll)  // 同 DLL，不同索引
+}
+```
 
 ### 8.5 实现细节
 
 - 多插件宏展开为静态数组，编译期确定，零运行时开销
-- 多插件入口不存在时自动回退到单插件入口
-- 两种入口都不存在时记录错误信息
+- 入口点不存在时记录错误信息并卸载 DLL
 - 重复 (typeId, implName) 对会被跳过，第一个注册的成为默认
+- ABI 版本不匹配的插件会被跳过并记录错误
 
 ---
 
@@ -497,7 +513,7 @@ for (int i = 0; i < count; i++) {
 
 3. **导出**
    - `src/<category>/XxxPlugin/src/module.cpp`
-   - `AX_EXPORT_TOOL(Xxx, IXxx)` 或 `AX_EXPORT_SERVICE(Xxx, IXxx)`
+   - 使用 `AX_BEGIN_PLUGIN_MAP()` + `AX_PLUGIN_TOOL(Xxx, IXxx)` + `AX_END_PLUGIN_MAP()`
 
 4. **CMakeLists.txt**
    - 链接 `AxInterface`（不是 AxCore）
@@ -600,7 +616,7 @@ for (int i = 0; i < AxPlug::GetPluginCount(); i++) {
 
 ### 12.4 关键约束
 
-- **每个 DLL 可导出一个或多个插件**（`GetAxPlugin` 单插件或 `GetAxPlugins` 多插件）
+- **每个 DLL 可导出一个或多个插件**（通过 `GetAxPlugins` 入口点）
 - **插件 DLL 不链接 AxCore**，只链接 `AxInterface`（header-only）
 - **对象必须在创建它的 DLL 中销毁**（`Destroy()` 中 `delete this`）
 - **不要在接口中使用 STL 容器作为参数或返回值**（跨 DLL ABI 不安全）
@@ -608,50 +624,4 @@ for (int i = 0; i < AxPlug::GetPluginCount(); i++) {
 
 ---
 
-## 13. 核心特性说明
-
-### 13.1 智能指针 (AxPtr)
-
-- `AxPtr<T>` 是 `std::shared_ptr<T>` 的类型别名
-- `AxPlug::CreateTool<T>()` 返回 `AxPtr<T>`，自定义 deleter 调用 `Ax_ReleaseObject`
-- RAII 自动释放，引用计数可查 (`use_count()`)
-- 向后兼容：`AxPlug::CreateToolRaw<T>()` 返回原始指针
-
-### 13.2 TypeId 热路径
-
-- `AX_INTERFACE(IMath)` 宏同时生成 `ax_interface_name` (string) 和 `ax_type_id` (uint64_t FNV-1a)
-- 注册表使用 `std::unordered_map<uint64_t, int>`，O(1) 查找
-- Service/Tool API 内部均使用 typeId 快速路径
-- `nameToTypeId_` 兼容层支持旧的字符串 API
-
-### 13.3 命名绑定
-
-- `AxPluginInfo::implName` 字段标识插件实现名称（如 `"boost"`，默认为 `""`）
-- `namedImplRegistry_`: `(typeId, implName) → flatIndex` 映射
-- `CreateObjectByIdNamed(typeId, implName)` 查找命名实现，`implName` 为空时回退到默认
-- `CreateTool<T>("boost")` / `CreateToolRaw<T>("boost")` 模板 API
-
-### 13.4 内置 Profiler
-
-- `AxProfiler` 生成 Chrome trace format (trace.json)
-- **流式写入**：每 8192 条结果自动刷盘，防止长时间运行内存溢出
-- RAII 宏：`AX_PROFILE_SCOPE("name")` / `AX_PROFILE_FUNCTION()`
-- 编译期开关：`#define AX_PROFILE_ENABLED 0` 禁用
-- 注意：`AxProfileTimer` 存储 `const char*` 原始指针，`name` 参数必须为静态字符串
-
-### 13.5 跨 DLL 错误处理
-
-- 错误状态存储在 AxCore.dll 的 `thread_local` 变量中（解决跨 DLL `thread_local` 不可见问题）
-- `AxErrorState` 类的所有方法通过 C API 路由到 AxCore
-- `AxExceptionGuard` 包裹所有 C API 入口，自动 try/catch
-- 预定义错误码：`AxErrorCode::PluginNotFound`, `PluginNotLoaded`, `FactoryFailed` 等
-
-### 13.6 shared_mutex 读写锁
-
-- 读多写少场景（如渲染循环中频繁获取 Service）无锁竞争
-- 双检锁模式确保 Service 首次创建的线程安全
-- LoggerService 的 `GetLogFile()`/`GetTimestampFormat()` 使用 `thread_local` snapshot 避免悬空指针
-
----
-
-*AxPlug 插件框架 · 开发与维护手册*
+*AxPlug v1.0 · 开发与维护手册*

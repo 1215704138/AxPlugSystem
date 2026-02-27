@@ -24,36 +24,39 @@
 
 // C export functions from AxCore.dll
 extern "C" {
-// Core API (backward compat)
+// Initialization API
 AX_CORE_API void Ax_Init(const char *pluginDir);
 AX_CORE_API void Ax_LoadPlugins(const char *pluginDir);
+
+// Object Lifecycle API (string-based)
 AX_CORE_API IAxObject *Ax_CreateObject(const char *interfaceName);
-AX_CORE_API IAxObject *Ax_GetSingleton(const char *interfaceName,
-                                       const char *serviceName);
-AX_CORE_API void Ax_ReleaseSingleton(const char *interfaceName,
-                                     const char *serviceName);
+AX_CORE_API IAxObject *Ax_GetSingleton(const char *interfaceName, const char *serviceName);
+AX_CORE_API void Ax_ReleaseSingleton(const char *interfaceName, const char *serviceName);
 AX_CORE_API void Ax_ReleaseObject(IAxObject *obj);
+
+// Object Lifecycle API (typeId-based, fast path)
+AX_CORE_API IAxObject *Ax_CreateObjectById(uint64_t typeId);
+AX_CORE_API IAxObject *Ax_CreateObjectByIdNamed(uint64_t typeId, const char *implName);
+AX_CORE_API IAxObject *Ax_GetSingletonById(uint64_t typeId, const char *serviceName);
+AX_CORE_API void Ax_ReleaseSingletonById(uint64_t typeId, const char *serviceName);
+
+// Query API
 AX_CORE_API int Ax_GetPluginCount();
 AX_CORE_API const char *Ax_GetPluginInterfaceName(int index);
 AX_CORE_API const char *Ax_GetPluginFileName(int index);
 AX_CORE_API int Ax_GetPluginType(int index);
 AX_CORE_API bool Ax_IsPluginLoaded(int index);
 
-// v3: TypeId Fast Path API
-AX_CORE_API IAxObject *Ax_CreateObjectById(uint64_t typeId);
-AX_CORE_API IAxObject *Ax_CreateObjectByIdNamed(uint64_t typeId, const char *implName);
-AX_CORE_API IAxObject *Ax_GetSingletonById(uint64_t typeId,
-                                           const char *serviceName);
-AX_CORE_API void Ax_ReleaseSingletonById(uint64_t typeId,
-                                         const char *serviceName);
+// Introspection API
+AX_CORE_API int Ax_FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount);
 
-// v3: Profiler API
+// Profiler API
 AX_CORE_API void Ax_ProfilerBeginSession(const char *name, const char *filepath);
 AX_CORE_API void Ax_ProfilerEndSession();
 AX_CORE_API void Ax_ProfilerWriteProfile(const AxProfileResult *result);
 AX_CORE_API int  Ax_ProfilerIsActive();
 
-// v3: Error Handling API (declarations in AxException.h)
+// Error Handling API (declarations in AxException.h)
 }
 
 // Plugin query info
@@ -98,10 +101,29 @@ inline void Init(const char *pluginDir = "") {
 
 // ========== Tool API (Smart Pointer) ==========
 
+namespace internal {
+    template <typename T, typename = void>
+    struct has_ax_type_id : std::false_type {};
+    
+    template <typename T>
+    struct has_ax_type_id<T, std::void_t<decltype(T::ax_type_id)>> : std::true_type {};
+}
+
 // Create a tool instance with automatic lifecycle management (shared_ptr)
 // When the last shared_ptr goes out of scope, the object is automatically
 // destroyed
 template <typename T> inline std::shared_ptr<T> CreateTool() {
+  static_assert(
+      std::is_base_of_v<IAxObject, T>,
+      "错误: T 必须继承自 IAxObject。"
+      "请检查你的接口类是否使用了 AX_INTERFACE() 宏。"
+  );
+  static_assert(
+      AxPlug::internal::has_ax_type_id<T>::value,
+      "错误: T 缺少 ax_type_id 定义。"
+      "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
+  );
+  
   IAxObject *obj = Ax_CreateObjectById(T::ax_type_id);
   if (!obj)
     return nullptr;
@@ -113,6 +135,17 @@ template <typename T> inline std::shared_ptr<T> CreateTool() {
 
 // Create a tool instance by named implementation (e.g. CreateTool<ITcpServer>("boost"))
 template <typename T> inline std::shared_ptr<T> CreateTool(const char *implName) {
+  static_assert(
+      std::is_base_of_v<IAxObject, T>,
+      "错误: T 必须继承自 IAxObject。"
+      "请检查你的接口类是否使用了 AX_INTERFACE() 宏。"
+  );
+  static_assert(
+      AxPlug::internal::has_ax_type_id<T>::value,
+      "错误: T 缺少 ax_type_id 定义。"
+      "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
+  );
+  
   IAxObject *obj = Ax_CreateObjectByIdNamed(T::ax_type_id, implName);
   if (!obj)
     return nullptr;
@@ -128,17 +161,39 @@ template <typename T> inline void DestroyTool(std::shared_ptr<T> &tool) {
   tool.reset();
 }
 
-// ========== Tool API (Raw Pointer, backward compat) ==========
+// ========== Tool API (Raw Pointer) ==========
 
 // Create a tool instance with manual lifecycle management
 // User MUST call DestroyTool(raw pointer) when done
 template <typename T> inline T *CreateToolRaw() {
+  static_assert(
+      std::is_base_of_v<IAxObject, T>,
+      "错误: T 必须继承自 IAxObject。"
+      "请检查你的接口类是否使用了 AX_INTERFACE() 宏。"
+  );
+  static_assert(
+      AxPlug::internal::has_ax_type_id<T>::value,
+      "错误: T 缺少 ax_type_id 定义。"
+      "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
+  );
+  
   IAxObject *obj = Ax_CreateObjectById(T::ax_type_id);
   return static_cast<T *>(obj);
 }
 
 // Create a raw pointer tool by named implementation
 template <typename T> inline T *CreateToolRaw(const char *implName) {
+  static_assert(
+      std::is_base_of_v<IAxObject, T>,
+      "错误: T 必须继承自 IAxObject。"
+      "请检查你的接口类是否使用了 AX_INTERFACE() 宏。"
+  );
+  static_assert(
+      AxPlug::internal::has_ax_type_id<T>::value,
+      "错误: T 缺少 ax_type_id 定义。"
+      "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
+  );
+  
   IAxObject *obj = Ax_CreateObjectByIdNamed(T::ax_type_id, implName);
   return static_cast<T *>(obj);
 }
@@ -155,8 +210,18 @@ inline void DestroyTool(IAxObject *tool) {
 // Get or create a named service instance (singleton per name)
 // Default name "" = global singleton
 // Different names create independent instances of the same service type
-// Uses typeId fast path (O(1) hash lookup, read-write lock)
 template <typename T> inline T *GetService(const char *name = "") {
+  static_assert(
+      std::is_base_of_v<IAxObject, T>,
+      "错误: T 必须继承自 IAxObject。"
+      "请检查你的接口类是否使用了 AX_INTERFACE() 宏。"
+  );
+  static_assert(
+      AxPlug::internal::has_ax_type_id<T>::value,
+      "错误: T 缺少 ax_type_id 定义。"
+      "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
+  );
+  
   IAxObject *obj = Ax_GetSingletonById(T::ax_type_id, name);
   return static_cast<T *>(obj);
 }
@@ -164,6 +229,26 @@ template <typename T> inline T *GetService(const char *name = "") {
 // Release a named service instance
 template <typename T> inline void ReleaseService(const char *name = "") {
   Ax_ReleaseSingletonById(T::ax_type_id, name);
+}
+
+// Noexcept service getter, returns (pointer, error_code) pair
+// Suitable for use in destructors or cleanup paths
+template <typename T> 
+[[nodiscard]] inline std::pair<T*, AxInstanceError> TryGetService(const char *name = "") noexcept {
+  static_assert(
+      std::is_base_of_v<IAxObject, T>,
+      "错误: T 必须继承自 IAxObject。"
+      "请检查你的接口类是否使用了 AX_INTERFACE() 宏。"
+  );
+  static_assert(
+      AxPlug::internal::has_ax_type_id<T>::value,
+      "错误: T 缺少 ax_type_id 定义。"
+      "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
+  );
+  
+  IAxObject* obj = Ax_GetSingletonById(T::ax_type_id, name);
+  AxInstanceError err = obj ? AxInstanceError::kSuccess : AxInstanceError::kErrorNotFound;
+  return { static_cast<T*>(obj), err };
 }
 
 // ========== Query API ==========
@@ -179,6 +264,20 @@ inline AxPluginQueryInfo GetPluginInfo(int index) {
   info.isTool = (Ax_GetPluginType(index) == 0);
   info.isLoaded = Ax_IsPluginLoaded(index);
   return info;
+}
+
+// Introspection API: Find all implementations of a specific interface
+template<typename T>
+std::vector<AxPluginQueryInfo> FindImplementations() {
+    int maxCount = 64; 
+    std::vector<int> indices(maxCount);
+    int count = Ax_FindPluginsByTypeId(T::ax_type_id, indices.data(), maxCount);
+    
+    std::vector<AxPluginQueryInfo> results;
+    for(int i = 0; i < count; ++i) {
+        results.push_back(GetPluginInfo(indices[i]));
+    }
+    return results;
 }
 
 // ========== Profiler API ==========

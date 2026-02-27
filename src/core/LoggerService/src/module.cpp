@@ -1,8 +1,6 @@
 #include "../include/LoggerService.h"
+#include "AxPlug/AxPluginExport.h"
 
-
-
-// 导出日志服务插件
-
-AX_EXPORT_SERVICE(LoggerService, ILoggerService)
-
+AX_BEGIN_PLUGIN_MAP()
+    AX_PLUGIN_SERVICE(LoggerService, ILoggerService)
+AX_END_PLUGIN_MAP()

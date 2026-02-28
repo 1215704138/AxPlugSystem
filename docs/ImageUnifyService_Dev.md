@@ -235,6 +235,7 @@ freeFrameData → poolFree(ptr, size)  // 回收到池
 - condition_variable唤醒, 调用线程处理第一块
 - generation计数器避免虚假唤醒
 - 唤醒延迟<10μs vs 线程创建~300μs
+- **防死锁退出**：显式提供 `Shutdown()` 供宿主的 `OnShutdown` 钩子主动协同调用（安全执行 `join`）。其析构函数中则使用 `detach()` 兜底。此举一举消灭常态化隐匿极深的 Windows 平台跨库加载的后台线程剥离级死锁。
 
 **效果**: 布局转换从2.35ms降至~1.2ms
 

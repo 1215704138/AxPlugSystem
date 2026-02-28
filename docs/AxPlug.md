@@ -35,8 +35,11 @@ AxPlug 是一个工业级 C++17 插件框架，支持动态加载 DLL 插件并�
 - **智能指针** (`AxPtr<T>`) RAII 自动管理 + 原始指针手动管理双模式
 - **内置 Profiler** 生成 Chrome trace.json，流式写入
 - **跨模块异常保护** + 跨 DLL 线程局部错误存储
-- **高性能并发** `shared_mutex` 读写锁 + `std::call_once` 无锁单例初始化
-- **LIFO 安全卸载** 逆序调用 `OnShutdown()` 钩子
+- **高性能无锁并发** `shared_mutex` 读写锁 + `std::call_once` 无死锁单例初始化
+- **LIFO 安全卸载** 逆序调用 `OnShutdown()` 钩子，防悬空引用
+- **静态析构防范 (SIOF Safe)** 独特的删除器守卫机制，绝对杜绝 DLL 卸载期 Use-After-Free
+- **零死锁进程退出** 内置线程池及后台服务在退出/DLL Detach 时通过 Detach Fallback 斩断死锁根源
+- **高吞吐无冲突 I/O** 提供原子级 TID+SEQ 文件写入能力，绝灭并发碰撞
 - **ABI 版本检查** 确保插件兼容性
 - **编译期 `static_assert` 防呆检查** 类型安全验证
 

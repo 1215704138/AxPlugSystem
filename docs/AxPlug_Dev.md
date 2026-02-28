@@ -300,7 +300,16 @@ GetService<T>(name)
 
 ReleaseService<T>(name)
   → Ax_ReleaseSingletonById(T::ax_type_id, name)
-  → unique_lock → 从 shutdownStack_ 移除 → erase holder
+  → unique_lock → 检查外部引用 externalRefs
+  → 若存在引用则 defer 析构 (pendingRelease = true)
+  → 若无引用则从 shutdownStack_ 移除 → erase holder
+
+### 5.4 SIOF 与静态生命周期安全
+
+框架为每一个通过 `GetService` 获取的 Service 返回了一个绑定自定义删除器的 `shared_ptr`。如果用户由于设计遗留将该 `shared_ptr` 封存在全局静态变量中（如 Meyer's 单体），当进程退出时极易发生静态对象析构顺序灾难（SIOF）：即 `AxPluginManager` 先于静态 `shared_ptr` 析构，导致删除器中调用的 `Ax_ReleaseSingletonRef` 发生毁灭性的 Access Violation Use-After-Free。
+
+**解决方案：**
+在 `AxCoreDll.cpp` 中定义一个**文件全局作用域**的 `std::atomic<bool> g_shuttingDown`，该变量生命周期必然长于函数内部静态局部变量形式的 Meyer's 单例。`AxPluginManager` 在析构的 `ReleaseAllSingletons` 阶段，会将其置为 true。同时，所有暴露给外部的 Service `shared_ptr` 删除器中，都前置了 `if (!Ax_IsShuttingDown())` 的条件检查。如此，即便单例管理器已熔毁散架，外围被绑架的残留 `shared_ptr` 也能凭借该哨兵静默自燃并安全回收，杜绝段错误。
 ```
 
 ### 5.4 框架退出时
@@ -321,7 +330,8 @@ ReleaseService<T>(name)
 - **双检锁**（Double-Check Locking）：`GetSingletonById` 先 shared_lock 检查，未命中再 unique_lock 创建
 - `GetPluginFileName` 使用 `thread_local` snapshot 避免 shared_lock 下的 mutable 成员竞态
 - 插件加载在 `Init()` 阶段一次性完成，`LoadPlugins` 带重复目录保护
-- 各插件自身的线程安全由插件实现者负责
+- 各插件自身的线程安全由插件实现者负责（除核心网络组件与设施外，这些驱动已完全由 `io_mutex_` 等进行了覆盖）
+- **Wait-On-Exit 死锁彻底规避**：对于驻留后台运转的基础服务线程（如 `StaticThreadPool` / 日志落盘等），均采用了极其周密的生命周期收割法：通过主动钩入用户安全期的 `OnShutdown` 函数执行 `join()` 回收；而针对静态生命周期大限及 DLL 卸载时的被动虚析构，一律实行 `detach` 兜底放弃。彻底根除 Windows 在 ExitProcess 及 FreeLibrary 时获取 loader lock 导致的连环死锁绝症。
 - 所有 C API 入口自动包裹 `AxExceptionGuard`，异常不会跨 DLL 传播
 
 ---

@@ -105,37 +105,41 @@ bool BoostTcpServer::IsRunning() const {
     return running_.load() && !stopped_.load();
 }
 
-ITcpClient* BoostTcpServer::Accept() {
+std::shared_ptr<ITcpClient> BoostTcpServer::Accept() {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     if (!pending_clients_.empty()) {
-        ITcpClient* client = pending_clients_.back();
+        auto client = pending_clients_.back();
         pending_clients_.pop_back();
         return client;
     }
     return nullptr;
 }
 
-ITcpClient* BoostTcpServer::GetClient(int index) {
+std::shared_ptr<ITcpClient> BoostTcpServer::GetClient(int index) {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     
-    if (index >= 0 && index < static_cast<int>(clients_.size())) {
-        return clients_[index].get();
+    if (index >= 0 && index < static_cast<int>(clients_.size()) && clients_[index]) {
+        return std::static_pointer_cast<ITcpClient>(clients_[index]);
     }
     
     return nullptr;
 }
 
-bool BoostTcpServer::DisconnectClient(ITcpClient* client) {
+bool BoostTcpServer::DisconnectClient(const std::shared_ptr<ITcpClient>& client) {
     if (!client) return false;
     
     std::lock_guard<std::mutex> lock(clients_mutex_);
     
-    auto it = client_index_map_.find(client);
+    BoostTcpClient* rawPtr = dynamic_cast<BoostTcpClient*>(client.get());
+    if (!rawPtr) return false;
+    
+    auto it = client_index_map_.find(rawPtr);
     if (it != client_index_map_.end()) {
         size_t index = it->second;
-        if (index < clients_.size() && clients_[index].get() == client) {
+        if (index < clients_.size() && clients_[index].get() == rawPtr) {
             clients_[index]->Disconnect();
             client_index_map_.erase(it);
+            free_indices_.push(index);
             clients_[index].reset();
             return true;
         }
@@ -156,6 +160,7 @@ bool BoostTcpServer::DisconnectAllClients() {
     client_index_map_.clear();
     pending_clients_.clear();
     clients_.clear();
+    while (!free_indices_.empty()) free_indices_.pop();  // Fix #7: Clear free stack
     return true;
 }
 
@@ -256,6 +261,9 @@ void BoostTcpServer::StartAccept() {
 }
 
 void BoostTcpServer::HandleAccept(const boost::system::error_code& ec) {
+    // Fix #3: Guard against callback firing during/after destruction
+    if (stopped_.load()) return;
+
     if (ec) {
         UpdateError(ec);
         if (ec != boost::asio::error::operation_aborted) {
@@ -265,7 +273,7 @@ void BoostTcpServer::HandleAccept(const boost::system::error_code& ec) {
     }
     
     try {
-        auto client = std::make_unique<BoostTcpClient>();
+        auto client = std::make_shared<BoostTcpClient>();
         
         // Fix 1.5: Transfer accepted socket ownership to client via AttachSocket
         if (!client->AttachSocket(std::move(*accept_socket_))) {
@@ -278,18 +286,18 @@ void BoostTcpServer::HandleAccept(const boost::system::error_code& ec) {
         
         size_t index = GetNextClientIndex();
         if (index < clients_.size()) {
-            clients_[index] = std::move(client);
+            clients_[index] = client;
         } else {
-            clients_.push_back(std::move(client));
+            clients_.push_back(client);
             index = clients_.size() - 1;
         }
         
-        ITcpClient* client_ptr = clients_[index].get();
+        BoostTcpClient* client_ptr = clients_[index].get();
         client_index_map_[client_ptr] = index;
         client_ptr->SetTimeout(timeout_ms_);
         
-        // Fix 1.13: Push to pending queue so Accept() returns only new connections
-        pending_clients_.push_back(client_ptr);
+        // Fix 1.1/1.2: Push shared_ptr to pending queue for safe lifetime management
+        pending_clients_.push_back(std::static_pointer_cast<ITcpClient>(client));
         
     } catch (const std::exception& e) {
         UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
@@ -322,7 +330,7 @@ void BoostTcpServer::StopWorkerThreads() {
     worker_threads_.clear();
 }
 
-void BoostTcpServer::RemoveClient(ITcpClient* client) {
+void BoostTcpServer::RemoveClient(BoostTcpClient* client) {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     
     auto it = client_index_map_.find(client);
@@ -330,6 +338,7 @@ void BoostTcpServer::RemoveClient(ITcpClient* client) {
         size_t index = it->second;
         if (index < clients_.size()) {
             clients_[index].reset();
+            free_indices_.push(index);
         }
         client_index_map_.erase(it);
     }
@@ -368,14 +377,12 @@ void BoostTcpServer::SetAcceptorOptions() {
 }
 
 size_t BoostTcpServer::GetNextClientIndex() {
-    // 查找空闲位置
-    for (size_t i = 0; i < clients_.size(); ++i) {
-        if (!clients_[i]) {
-            return i;
-        }
+    // Fix #7: O(1) free slot lookup via stack
+    if (!free_indices_.empty()) {
+        size_t idx = free_indices_.top();
+        free_indices_.pop();
+        return idx;
     }
-    
-    // 返回新位置
     return clients_.size();
 }
 

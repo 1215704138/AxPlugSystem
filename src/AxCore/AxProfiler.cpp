@@ -45,43 +45,69 @@ public:
     }
 
     void BeginSession(const char* name, const char* filepath) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (active_) return;
-        sessionName_ = name ? name : "AxPlug";
-        filepath_ = filepath ? filepath : "trace.json";
-        active_ = true;
-        resultCount_ = 0;
-        results_.clear();
-        results_.reserve(kFlushThreshold);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (active_) return;
+            active_ = true;
+            sessionName_ = name ? name : "AxPlug";
+            filepath_ = filepath ? filepath : "trace.json";
+            results_.clear();
+            results_.reserve(kFlushThreshold);
+        }
+        {
+            std::lock_guard<std::mutex> ioLock(ioMutex_);
+            if (file_.is_open()) {
+                file_ << "]}";
+                file_.flush();
+                file_.close();
+            }
+            resultCount_ = 0;
+        }
     }
 
     void EndSession() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!active_) return;
-        FlushResultsLocked();
+        std::vector<InternalResult> localResults;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!active_) return;
+            active_ = false;
+            localResults.swap(results_);
+        }
+        std::lock_guard<std::mutex> ioLock(ioMutex_);
+        if (active_.load(std::memory_order_acquire)) {
+            return;
+        }
+        FlushToFile(localResults);
         if (file_.is_open()) {
             file_ << "]}";
             file_.flush();
             file_.close();
         }
-        active_ = false;
         resultCount_ = 0;
     }
 
     void WriteProfile(const AxProfileResult* result) {
         if (!result) return;
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!active_) return;
-        InternalResult ir;
-        ir.name = result->name ? result->name : "";
-        ir.category = result->category ? result->category : "";
-        ir.start = result->start;
-        ir.duration = result->duration;
-        ir.threadId = result->threadId;
-        ir.processId = result->processId;
-        results_.push_back(std::move(ir));
-        if (results_.size() >= kFlushThreshold) {
-            FlushResultsLocked();
+        std::vector<InternalResult> localResults;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!active_) return;
+            InternalResult ir;
+            ir.name = result->name ? result->name : "";
+            ir.category = result->category ? result->category : "";
+            ir.start = result->start;
+            ir.duration = result->duration;
+            ir.threadId = result->threadId;
+            ir.processId = result->processId;
+            results_.push_back(std::move(ir));
+            if (results_.size() >= kFlushThreshold) {
+                localResults.swap(results_);
+                results_.reserve(kFlushThreshold);
+            }
+        }
+        if (!localResults.empty()) {
+            std::lock_guard<std::mutex> ioLock(ioMutex_);
+            FlushToFile(localResults);
         }
     }
 
@@ -95,25 +121,25 @@ private:
     AxProfilerImpl(const AxProfilerImpl&) = delete;
     AxProfilerImpl& operator=(const AxProfilerImpl&) = delete;
 
-    // Flush buffered results to file (caller must hold mutex_)
-    void FlushResultsLocked() {
-        if (results_.empty()) return;
+    // Flush results to file (caller must hold ioMutex_)
+    void FlushToFile(const std::vector<InternalResult>& batch) {
+        if (batch.empty()) return;
         if (!file_.is_open()) {
             file_.open(filepath_);
-            if (!file_.is_open()) { results_.clear(); return; }
+            if (!file_.is_open()) return;
             file_ << "{\"otherData\":{\"session\":\"" << EscapeJson(sessionName_) << "\"},\"traceEvents\":[";
         }
-        for (const auto& r : results_) {
+        for (const auto& r : batch) {
             if (resultCount_ > 0) file_ << ",";
             file_ << "{\"cat\":\"" << EscapeJson(r.category) << "\",\"dur\":" << r.duration << ",\"name\":\"" << EscapeJson(r.name) << "\",\"ph\":\"X\",\"pid\":" << r.processId << ",\"tid\":" << r.threadId << ",\"ts\":" << r.start << "}";
             resultCount_++;
         }
         file_.flush();
-        results_.clear();
     }
 
     static constexpr size_t kFlushThreshold = 8192;
-    std::mutex mutex_;
+    std::mutex mutex_;      // protects results_, active_
+    std::mutex ioMutex_;    // protects file_ I/O operations
     std::string sessionName_;
     std::string filepath_;
     std::ofstream file_;

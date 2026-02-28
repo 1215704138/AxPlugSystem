@@ -134,6 +134,7 @@ class StaticThreadPool {
     std::vector<WorkItem>     items_;
     std::vector<int>          workerGen_;
     std::mutex                mutex_;
+    std::mutex                submitMutex_;  // Fix 2.1: Prevent concurrent parallelFor overwrites
     std::condition_variable   startCv_;
     std::condition_variable   doneCv_;
     std::atomic<int>          pending_{0};
@@ -152,6 +153,9 @@ public:
     void parallelFor(int h, const std::function<void(int, int)>& func) {
         int n = static_cast<int>(workers_.size());
         if (n <= 0 || h <= 0) { func(0, h); return; }
+
+        // Fix 2.1: Serialize concurrent parallelFor calls to prevent item overwrite
+        std::lock_guard<std::mutex> submitLock(submitMutex_);
 
         int total = n + 1;  // workers + calling thread
         int chunk = (h + total - 1) / total;
@@ -750,21 +754,36 @@ void ImageUnifyService::poolFree(void* ptr, size_t size) {
 }
 
 void ImageUnifyService::freeFrameData(FrameItem& frame) {
-    // 释放所有视图
+    // Fix 2.2: Skip views with refCount > 0, defer to orphanedViews_
     for (auto& v : frame.views) {
         if (v->dataPtr) {
-            memoryUsage_.fetch_sub(v->dataSize, std::memory_order_relaxed);  // [优化7]
-            poolFree(v->dataPtr, v->dataSize);
-            v->dataPtr = nullptr;
+            if (v->refCount.load(std::memory_order_relaxed) > 0) {
+                orphanedViews_.push_back(std::move(v));
+            } else {
+                if (v->dataSize > 0) { memoryUsage_.fetch_sub(v->dataSize, std::memory_order_relaxed); poolFree(v->dataPtr, v->dataSize); }
+                v->dataPtr = nullptr;
+            }
         }
     }
     frame.views.clear();
     // 释放原始数据
     if (frame.ownedData) {
-        memoryUsage_.fetch_sub(frame.ownedDataSize, std::memory_order_relaxed);  // [优化7]
+        memoryUsage_.fetch_sub(frame.ownedDataSize, std::memory_order_relaxed);
         poolFree(frame.ownedData, frame.ownedDataSize);
         frame.ownedData = nullptr;
         frame.original.dataPtr = nullptr;
+    }
+}
+
+void ImageUnifyService::cleanupOrphanedViews() {
+    for (auto it = orphanedViews_.begin(); it != orphanedViews_.end(); ) {
+        if ((*it)->refCount.load(std::memory_order_relaxed) <= 0 && (*it)->dataPtr) {
+            if ((*it)->dataSize > 0) { memoryUsage_.fetch_sub((*it)->dataSize, std::memory_order_relaxed); poolFree((*it)->dataPtr, (*it)->dataSize); }
+            (*it)->dataPtr = nullptr;
+            it = orphanedViews_.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 
@@ -874,26 +893,27 @@ bool ImageUnifyService::HasFrame(uint64_t frameId) const {
 // ---- 视图获取 ----
 
 ImageDescriptor ImageUnifyService::GetView(uint64_t frameId, MemoryLayout targetLayout) {
-    std::lock_guard<std::mutex> lock(framesMutex_);
-
-    auto it = frames_.find(frameId);
-    if (it == frames_.end()) {
-        setError("GetView: frameId=" + std::to_string(frameId) + " 不存在");
-        return {};
+    // Fix #2: Fine-grained locking — find frame under global lock, then release it
+    FrameItem* framePtr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(framesMutex_);
+        auto it = frames_.find(frameId);
+        if (it == frames_.end()) {
+            setError("GetView: frameId=" + std::to_string(frameId) + " 不存在");
+            return {};
+        }
+        framePtr = it->second.get();
     }
-
-    auto& frame = *(it->second);
 
     // [优化5] 更新布局请求统计
     if (targetLayout == MemoryLayout::Planar)      planarHits_++;
     else if (targetLayout == MemoryLayout::Interleaved) interleavedHits_++;
 
-    // 零拷贝快速路径
-    if (frame.original.layout == targetLayout) {
-        return frame.original;
-    }
+    // Per-item lock for the potentially expensive transformation
+    std::lock_guard<std::mutex> itemLock(framePtr->itemMutex);
 
-    auto view = findOrCreateView(frame, targetLayout);
+    // Fix #4: Zero-copy path now uses a virtual view for consistent refCount semantics
+    auto view = findOrCreateView(*framePtr, targetLayout);
     if (!view || !view->dataPtr) {
         setError("GetView: 布局转换失败");
         return {};
@@ -903,7 +923,7 @@ ImageDescriptor ImageUnifyService::GetView(uint64_t frameId, MemoryLayout target
     view->refCount.fetch_add(1, std::memory_order_relaxed);
     view->lastAccess = std::chrono::steady_clock::now();
 
-    ImageDescriptor desc = frame.original;
+    ImageDescriptor desc = framePtr->original;
     desc.dataPtr = view->dataPtr;
     desc.layout  = targetLayout;
     desc.step    = desc.width * desc.getBytesPerPixel();
@@ -914,14 +934,23 @@ void ImageUnifyService::ReleaseView(uint64_t frameId, void* viewPtr) {
     // [优化2] 引用计数递减 — 当refCount归零时视图可被LRU淘汰
     std::lock_guard<std::mutex> lock(framesMutex_);
     auto it = frames_.find(frameId);
-    if (it == frames_.end()) return;
-
-    for (auto& v : it->second->views) {
-        if (v->dataPtr == viewPtr) {
-            v->refCount.fetch_sub(1, std::memory_order_relaxed);
-            return;
+    if (it != frames_.end()) {
+        for (auto& v : it->second->views) {
+            if (v->dataPtr == viewPtr) {
+                v->refCount.fetch_sub(1, std::memory_order_relaxed);
+                cleanupOrphanedViews();
+                return;
+            }
         }
     }
+    // Fix 2.2: Also check orphaned views for matching pointer
+    for (auto& v : orphanedViews_) {
+        if (v->dataPtr == viewPtr) {
+            v->refCount.fetch_sub(1, std::memory_order_relaxed);
+            break;
+        }
+    }
+    cleanupOrphanedViews();
 }
 
 // ---- 配置 ----
@@ -958,6 +987,16 @@ std::shared_ptr<ViewCacheItem> ImageUnifyService::findOrCreateView(
         if (v->layout == targetLayout && v->dataPtr) {
             return v;
         }
+    }
+
+    // Fix #4: Zero-copy path — create virtual view referencing original data (no alloc, dataSize=0)
+    if (frame.original.layout == targetLayout) {
+        auto view = std::make_shared<ViewCacheItem>();
+        view->layout   = targetLayout;
+        view->dataPtr  = frame.original.dataPtr;
+        view->dataSize = 0;  // 0 = not owned, skip poolFree
+        frame.views.push_back(view);
+        return view;
     }
 
     // [优化1] 从内存池分配目标缓冲区

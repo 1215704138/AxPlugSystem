@@ -51,6 +51,7 @@ bool TcpClientConnection::Connect(const char* host, int port) {
 }
 
 bool TcpClientConnection::Disconnect() {
+    std::lock_guard<std::mutex> lock(socketMutex_);
     if (socket_ != INVALID_SOCKET) {
         closesocket(socket_);
         socket_ = INVALID_SOCKET;
@@ -68,6 +69,7 @@ bool TcpClientConnection::IsConnecting() const {
 }
 
 bool TcpClientConnection::Send(const uint8_t* data, size_t len) {
+    std::lock_guard<std::mutex> lock(socketMutex_);
     if (!isConnected_ || socket_ == INVALID_SOCKET) {
         setError("未连接", 0);
         return false;
@@ -89,6 +91,7 @@ bool TcpClientConnection::SendString(const char* data) {
 }
 
 bool TcpClientConnection::Receive(uint8_t* buffer, size_t maxLen, size_t& outLen) {
+    std::lock_guard<std::mutex> lock(socketMutex_);
     if (!isConnected_ || socket_ == INVALID_SOCKET) {
         setError("未连接", 0);
         outLen = 0;
@@ -335,6 +338,7 @@ bool TcpServer::Listen(int port, int backlog) {
 }
 
 bool TcpServer::StopListening() {
+    std::lock_guard<std::mutex> lock(listenMutex_);
     if (listenSocket_ != INVALID_SOCKET) {
         closesocket(listenSocket_);
         listenSocket_ = INVALID_SOCKET;
@@ -353,16 +357,21 @@ bool TcpServer::IsRunning() const {
     return isRunning_;
 }
 
-ITcpClient* TcpServer::Accept() {
-    if (!isListening_ || listenSocket_ == INVALID_SOCKET) {
-        setError("未在监听", 0);
-        return nullptr;
+std::shared_ptr<ITcpClient> TcpServer::Accept() {
+    SOCKET listenSock;
+    {
+        std::lock_guard<std::mutex> lock(listenMutex_);
+        if (!isListening_ || listenSocket_ == INVALID_SOCKET) {
+            setError("未在监听", 0);
+            return nullptr;
+        }
+        listenSock = listenSocket_;
     }
     
     sockaddr_in clientAddr;
     int addrLen = sizeof(clientAddr);
     
-    SOCKET clientSocket = accept(listenSocket_, (sockaddr*)&clientAddr, &addrLen);
+    SOCKET clientSocket = accept(listenSock, (sockaddr*)&clientAddr, &addrLen);
     if (clientSocket == INVALID_SOCKET) {
         setError("接受连接失败", WSAGetLastError());
         return nullptr;
@@ -384,29 +393,26 @@ ITcpClient* TcpServer::Accept() {
         clients_.push_back(client);
     }
     
-    return client.get();  // Return raw pointer for backward compatibility
+    return client;  // Fix 1.1: Return shared_ptr for safe lifetime management
 }
 
-ITcpClient* TcpServer::GetClient(int index) {
+std::shared_ptr<ITcpClient> TcpServer::GetClient(int index) {
     std::lock_guard<std::mutex> lock(clientsMutex_);
     if (index >= 0 && index < static_cast<int>(clients_.size())) {
-        // 检查客户端是否仍然有效且已连接
         auto client = clients_[index];
         if (client && client->IsConnected()) {
-            return client.get();  // Return raw pointer, kept alive by shared_ptr
+            return client;  // Fix 1.1: Return shared_ptr for safe lifetime management
         }
     }
     return nullptr;
 }
 
-bool TcpServer::DisconnectClient(ITcpClient* client) {
+bool TcpServer::DisconnectClient(const std::shared_ptr<ITcpClient>& client) {
+    if (!client) return false;
     std::shared_ptr<TcpClientConnection> toDelete;
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
-        auto it = std::find_if(clients_.begin(), clients_.end(),
-            [client](const std::shared_ptr<TcpClientConnection>& ptr) {
-                return ptr.get() == static_cast<TcpClientConnection*>(client);
-            });
+        auto it = std::find_if(clients_.begin(), clients_.end(), [&client](const std::shared_ptr<TcpClientConnection>& ptr) { return ptr.get() == static_cast<TcpClientConnection*>(client.get()); });
         if (it != clients_.end()) {
             toDelete = *it;
             clients_.erase(it);
@@ -415,7 +421,6 @@ bool TcpServer::DisconnectClient(ITcpClient* client) {
     if (toDelete) {
         toDelete->server_ = nullptr;
         toDelete->Disconnect();
-        // shared_ptr will automatically delete when no longer referenced
         return true;
     }
     return false;

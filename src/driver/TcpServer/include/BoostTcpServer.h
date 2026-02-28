@@ -8,6 +8,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <stack>
 
 // 前向声明
 class BoostTcpClient;
@@ -24,9 +25,9 @@ public:
     bool IsRunning() const override;
 
     // 连接管理
-    ITcpClient* Accept() override;
-    ITcpClient* GetClient(int index) override;
-    bool DisconnectClient(ITcpClient* client) override;
+    std::shared_ptr<ITcpClient> Accept() override;
+    std::shared_ptr<ITcpClient> GetClient(int index) override;
+    bool DisconnectClient(const std::shared_ptr<ITcpClient>& client) override;
     bool DisconnectAllClients() override;
 
     // 服务器信息
@@ -62,9 +63,10 @@ private:
     
     // 客户端管理
     mutable std::mutex clients_mutex_;
-    std::vector<std::unique_ptr<BoostTcpClient>> clients_;
-    std::unordered_map<ITcpClient*, size_t> client_index_map_;
-    std::vector<ITcpClient*> pending_clients_;
+    std::vector<std::shared_ptr<BoostTcpClient>> clients_;
+    std::unordered_map<BoostTcpClient*, size_t> client_index_map_;
+    std::vector<std::shared_ptr<ITcpClient>> pending_clients_;
+    std::stack<size_t> free_indices_;  // Fix #7: O(1) free slot lookup
     int max_connections_;
 
     // 延迟重试定时器（防止 UAF）
@@ -91,7 +93,7 @@ private:
     void HandleAccept(const boost::system::error_code& ec);
     void StartWorkerThreads();
     void StopWorkerThreads();
-    void RemoveClient(ITcpClient* client);
+    void RemoveClient(BoostTcpClient* client);
     void OptimizeAcceptor();
     void SetAcceptorOptions();
     size_t GetNextClientIndex();

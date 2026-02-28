@@ -92,6 +92,9 @@ private:
     mutable std::mutex multicast_mutex_;
     std::unordered_set<std::string> multicast_groups_;
     
+    // I/O serialization mutex for thread-safe SendTo/Receive
+    std::mutex io_mutex_;
+
     // 错误信息
     mutable std::mutex error_mutex_;
     std::string last_error_;

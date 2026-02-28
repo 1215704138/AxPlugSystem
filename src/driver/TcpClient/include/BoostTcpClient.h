@@ -73,6 +73,9 @@ private:
     int timeout_ms_;
     bool keep_alive_enabled_;
     
+    // I/O serialization mutex for thread-safe Send/Receive/Disconnect
+    std::mutex io_mutex_;
+
     // 错误信息
     mutable std::mutex error_mutex_;
     std::string last_error_;
@@ -102,4 +105,5 @@ private:
     void EnableNoDelay();
     void EnableQuickAck();
     void SetSocketBufferSizes();
+    void ApplySocketTimeouts();
 };

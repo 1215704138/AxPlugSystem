@@ -55,8 +55,7 @@ void BoostTcpClient::AttachUpdateState() {
 
 bool BoostTcpClient::Connect(const char* host, int port) {
     if (connected_.load() || connecting_.load()) {
-        UpdateError(boost::system::error_code(boost::system::errc::operation_in_progress, 
-                                            boost::system::system_category()));
+        UpdateError(boost::system::error_code(boost::system::errc::operation_in_progress, boost::system::system_category()));
         return false;
     }
 
@@ -64,52 +63,64 @@ bool BoostTcpClient::Connect(const char* host, int port) {
         connecting_.store(true);
         stopped_.store(false);
         
-        // 重置socket
-        if (socket_->is_open()) {
-            socket_->close();
+        if (socket_->is_open()) socket_->close();
+        
+        // Synchronous resolve
+        boost::system::error_code ec;
+        std::string port_str = std::to_string(port);
+        auto results = resolver_->resolve(host, port_str, ec);
+        if (ec) { UpdateError(ec); connecting_.store(false); return false; }
+        
+        // Non-blocking connect with timeout via select
+        auto endpoint_it = results.begin();
+        socket_->open(endpoint_it->endpoint().protocol(), ec);
+        if (ec) { UpdateError(ec); connecting_.store(false); return false; }
+        
+        socket_->non_blocking(true);
+        socket_->connect(endpoint_it->endpoint(), ec);
+        
+        if (ec == boost::asio::error::in_progress || ec == boost::asio::error::would_block) {
+            fd_set writefds, errfds;
+            FD_ZERO(&writefds);
+            FD_ZERO(&errfds);
+            FD_SET(socket_->native_handle(), &writefds);
+            FD_SET(socket_->native_handle(), &errfds);
+            timeval tv;
+            tv.tv_sec = timeout_ms_ / 1000;
+            tv.tv_usec = (timeout_ms_ % 1000) * 1000;
+            int sel = ::select(0, nullptr, &writefds, &errfds, &tv);
+            if (sel <= 0 || FD_ISSET(socket_->native_handle(), &errfds)) {
+                socket_->close();
+                UpdateError(boost::system::error_code(boost::system::errc::timed_out, boost::system::system_category()));
+                connecting_.store(false);
+                return false;
+            }
+            // Verify connection succeeded
+            int optval = 0;
+            int optlen = sizeof(optval);
+            ::getsockopt(socket_->native_handle(), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&optval), &optlen);
+            if (optval != 0) {
+                socket_->close();
+                UpdateError(boost::system::error_code(optval, boost::system::system_category()));
+                connecting_.store(false);
+                return false;
+            }
+        } else if (ec) {
+            UpdateError(ec);
+            connecting_.store(false);
+            return false;
         }
         
-        // 设置连接超时
-        connect_timer_->expires_from_now(boost::posix_time::milliseconds(timeout_ms_));
-        connect_timer_->async_wait(boost::bind(&BoostTcpClient::HandleTimeout, this,
-                                             boost::asio::placeholders::error));
-        
-        // 异步解析和连接
-        std::string port_str = std::to_string(port);
-        resolver_->async_resolve(host, port_str,
-            [this, host, port](const boost::system::error_code& ec, 
-                              boost::asio::ip::tcp::resolver::results_type results) {
-                if (ec) {
-                    UpdateError(ec);
-                    connecting_.store(false);
-                    return;
-                }
-                
-                // 异步连接
-                boost::asio::async_connect(*socket_, results,
-                    [this, host, port](const boost::system::error_code& ec,
-                                      const boost::asio::ip::tcp::endpoint& endpoint) {
-                        connect_timer_->cancel();
-                        HandleConnect(ec);
-                        
-                        if (!ec) {
-                            remote_address_ = host;
-                            remote_port_ = port;
-                            UpdateAddressInfo();
-                            // Fix 1.9: Removed StartReceive() - no io_context driver thread exists after run_for() returns,
-                            // so async_receive callbacks would never fire. Sync Receive() via read_some still works.
-                        }
-                    });
-            });
-        
-        // 运行io_context直到连接完成或超时
-        io_context_->run_for(std::chrono::milliseconds(timeout_ms_));
-        
-        return connected_.load();
+        socket_->non_blocking(false);
+        connected_.store(true);
+        connecting_.store(false);
+        SetSocketOptions();
+        ApplySocketTimeouts();
+        UpdateAddressInfo();
+        return true;
         
     } catch (const std::exception& e) {
-        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, 
-                                            boost::system::system_category()));
+        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
         connecting_.store(false);
         return false;
     }
@@ -120,6 +131,7 @@ bool BoostTcpClient::Disconnect() {
         return true;
     }
     
+    std::lock_guard<std::mutex> lock(io_mutex_);
     StopInternal();
     return true;
 }
@@ -133,26 +145,20 @@ bool BoostTcpClient::IsConnecting() const {
 }
 
 bool BoostTcpClient::Send(const uint8_t* data, size_t len) {
-    if (!connected_.load() || !data || len == 0) {
-        return false;
-    }
+    if (!connected_.load() || !data || len == 0) return false;
     
+    std::lock_guard<std::mutex> lock(io_mutex_);
     try {
         boost::system::error_code ec;
-        size_t bytes_sent = boost::asio::write(*socket_, 
-            boost::asio::buffer(data, len), ec);
-        
+        size_t total_sent = boost::asio::write(*socket_, boost::asio::buffer(data, len), ec);
         if (ec) {
             UpdateError(ec);
             connected_.store(false);
             return false;
         }
-        
-        return bytes_sent == len;
-        
+        return total_sent == len;
     } catch (const std::exception& e) {
-        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, 
-                                            boost::system::system_category()));
+        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
         return false;
     }
 }
@@ -163,30 +169,22 @@ bool BoostTcpClient::SendString(const char* data) {
 }
 
 bool BoostTcpClient::Receive(uint8_t* buffer, size_t maxLen, size_t& outLen) {
-    if (!connected_.load() || !buffer || maxLen == 0) {
-        outLen = 0;
-        return false;
-    }
+    if (!connected_.load() || !buffer || maxLen == 0) { outLen = 0; return false; }
     
+    std::lock_guard<std::mutex> lock(io_mutex_);
     try {
         boost::system::error_code ec;
-        size_t bytes_received = socket_->read_some(boost::asio::buffer(buffer, maxLen), ec);
-        
+        outLen = socket_->read_some(boost::asio::buffer(buffer, maxLen), ec);
         if (ec) {
             UpdateError(ec);
-            if (ec != boost::asio::error::would_block) {
-                connected_.store(false);
-            }
+            if (ec != boost::asio::error::would_block) connected_.store(false);
             outLen = 0;
             return false;
         }
-        
-        outLen = bytes_received;
+        if (outLen == 0) { connected_.store(false); }
         return true;
-        
     } catch (const std::exception& e) {
-        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, 
-                                            boost::system::system_category()));
+        UpdateError(boost::system::error_code(boost::system::errc::resource_unavailable_try_again, boost::system::system_category()));
         outLen = 0;
         return false;
     }
@@ -218,6 +216,7 @@ int BoostTcpClient::GetRemotePort() const {
 
 void BoostTcpClient::SetTimeout(int milliseconds) {
     timeout_ms_ = milliseconds;
+    ApplySocketTimeouts();
 }
 
 int BoostTcpClient::GetTimeout() const {
@@ -413,15 +412,22 @@ void BoostTcpClient::SetSocketBufferSizes() {
     if (!socket_ || !socket_->is_open()) return;
     
     try {
-        // 设置发送缓冲区
         boost::asio::socket_base::send_buffer_size send_option(buffer_size_);
         socket_->set_option(send_option);
-        
-        // 设置接收缓冲区
         boost::asio::socket_base::receive_buffer_size recv_option(buffer_size_);
         socket_->set_option(recv_option);
-        
     } catch (const std::exception& e) {
         // 忽略缓冲区设置错误
+    }
+}
+
+void BoostTcpClient::ApplySocketTimeouts() {
+    if (!socket_ || !socket_->is_open()) return;
+    try {
+        DWORD timeout_val = static_cast<DWORD>(timeout_ms_);
+        ::setsockopt(socket_->native_handle(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_val), sizeof(timeout_val));
+        ::setsockopt(socket_->native_handle(), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_val), sizeof(timeout_val));
+    } catch (const std::exception& e) {
+        // 忽略超时设置错误
     }
 }

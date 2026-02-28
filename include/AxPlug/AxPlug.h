@@ -39,6 +39,8 @@ AX_CORE_API IAxObject *Ax_CreateObjectById(uint64_t typeId);
 AX_CORE_API IAxObject *Ax_CreateObjectByIdNamed(uint64_t typeId, const char *implName);
 AX_CORE_API IAxObject *Ax_GetSingletonById(uint64_t typeId, const char *serviceName);
 AX_CORE_API void Ax_ReleaseSingletonById(uint64_t typeId, const char *serviceName);
+AX_CORE_API IAxObject *Ax_AcquireSingletonById(uint64_t typeId, const char *serviceName);
+AX_CORE_API void Ax_ReleaseSingletonRef(uint64_t typeId, const char *serviceName);
 
 // Query API
 AX_CORE_API int Ax_GetPluginCount();
@@ -210,7 +212,8 @@ inline void DestroyTool(IAxObject *tool) {
 // Get or create a named service instance (singleton per name)
 // Default name "" = global singleton
 // Different names create independent instances of the same service type
-template <typename T> inline T *GetService(const char *name = "") {
+// Returns shared_ptr<T> with ref-counting: prevents UAF when ReleaseSingleton is called
+template <typename T> inline std::shared_ptr<T> GetService(const char *name = "") {
   static_assert(
       std::is_base_of_v<IAxObject, T>,
       "错误: T 必须继承自 IAxObject。"
@@ -222,6 +225,17 @@ template <typename T> inline T *GetService(const char *name = "") {
       "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
   );
   
+  IAxObject *obj = Ax_AcquireSingletonById(T::ax_type_id, name);
+  if (!obj) return nullptr;
+  uint64_t typeId = T::ax_type_id;
+  std::string nameStr = name ? name : "";
+  return std::shared_ptr<T>(static_cast<T *>(obj), [typeId, nameStr](T *) { Ax_ReleaseSingletonRef(typeId, nameStr.c_str()); });
+}
+
+// Legacy raw-pointer getter for backward compatibility (no UAF protection)
+template <typename T> inline T *GetServiceRaw(const char *name = "") {
+  static_assert(std::is_base_of_v<IAxObject, T>, "错误: T 必须继承自 IAxObject。");
+  static_assert(AxPlug::internal::has_ax_type_id<T>::value, "错误: T 缺少 ax_type_id 定义。");
   IAxObject *obj = Ax_GetSingletonById(T::ax_type_id, name);
   return static_cast<T *>(obj);
 }
@@ -231,10 +245,10 @@ template <typename T> inline void ReleaseService(const char *name = "") {
   Ax_ReleaseSingletonById(T::ax_type_id, name);
 }
 
-// Noexcept service getter, returns (pointer, error_code) pair
+// Noexcept service getter, returns (shared_ptr, error_code) pair
 // Suitable for use in destructors or cleanup paths
 template <typename T> 
-[[nodiscard]] inline std::pair<T*, AxInstanceError> TryGetService(const char *name = "") noexcept {
+[[nodiscard]] inline std::pair<std::shared_ptr<T>, AxInstanceError> TryGetService(const char *name = "") noexcept {
   static_assert(
       std::is_base_of_v<IAxObject, T>,
       "错误: T 必须继承自 IAxObject。"
@@ -246,9 +260,12 @@ template <typename T>
       "请确保你的接口类使用了 AX_INTERFACE(InterfaceName) 宏。"
   );
   
-  IAxObject* obj = Ax_GetSingletonById(T::ax_type_id, name);
-  AxInstanceError err = obj ? AxInstanceError::kSuccess : AxInstanceError::kErrorNotFound;
-  return { static_cast<T*>(obj), err };
+  IAxObject* obj = Ax_AcquireSingletonById(T::ax_type_id, name);
+  if (!obj) return { nullptr, AxInstanceError::kErrorNotFound };
+  uint64_t typeId = T::ax_type_id;
+  std::string nameStr = name ? name : "";
+  auto ptr = std::shared_ptr<T>(static_cast<T*>(obj), [typeId, nameStr](T*) { Ax_ReleaseSingletonRef(typeId, nameStr.c_str()); });
+  return { ptr, AxInstanceError::kSuccess };
 }
 
 // ========== Query API ==========

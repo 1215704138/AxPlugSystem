@@ -1000,31 +1000,31 @@ int main() {
     // 通过插件系统加载服务
     AxPlug::Init();
 
-    auto* svc = AxPlug::GetService<IImageUnifyService>();
+    auto svc = AxPlug::GetService<IImageUnifyService>();
     if (!svc) {
         std::cerr << "无法加载 ImageUnifyService 插件!" << std::endl;
         return 1;
     }
 
     // 运行所有测试
-    Test_BasicAPI(svc);
-    Test_RAII(svc);
-    Test_MultiFrame(svc);
-    Test_Performance(svc);
-    Test_DescriptorCreate(svc);
-    Test_RealImagePerformance(svc);
-    Test_ChannelAccess(svc);
-    Test_MultiFormatPerformance(svc);
-    Test_QImageFormat(svc);
+    Test_BasicAPI(svc.get());
+    Test_RAII(svc.get());
+    Test_MultiFrame(svc.get());
+    Test_Performance(svc.get());
+    Test_DescriptorCreate(svc.get());
+    Test_RealImagePerformance(svc.get());
+    Test_ChannelAccess(svc.get());
+    Test_MultiFormatPerformance(svc.get());
+    Test_QImageFormat(svc.get());
 
 #ifdef HAS_OPENCV
-    Test_OpenCVIntegration(svc);
+    Test_OpenCVIntegration(svc.get());
 #else
     std::cout << "\n[跳过] OpenCV集成测试 (未定义 HAS_OPENCV)" << std::endl;
 #endif
 
 #ifdef HAS_HALCON
-    Test_HalconIntegration(svc);
+    Test_HalconIntegration(svc.get());
 #else
     std::cout << "\n[跳过] Halcon集成测试 (未定义 HAS_HALCON)" << std::endl;
 #endif

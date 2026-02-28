@@ -110,8 +110,8 @@ void LoggerService::writeToFile(const std::string &message) {
     }
 
     if (logFile_.is_open()) {
-      logFile_ << message << std::endl;
-      logFile_.flush();
+      // Fix #6: Removed per-write flush; use Flush() API for explicit flushing
+      logFile_ << message << "\n";
     }
   }
 }
@@ -125,7 +125,8 @@ void LoggerService::writeToConsole(const std::string &message) {
 }
 
 void LoggerService::Log(LogLevel level, const char *message) {
-  if (level < currentLevel_) {
+  // Fix 5: Use atomic load for currentLevel_
+  if (level < currentLevel_.load(std::memory_order_relaxed)) {
     return;
   }
 
@@ -168,7 +169,7 @@ void LoggerService::Critical(const char *message) {
 }
 
 void LoggerService::LogFormat(LogLevel level, const char *format, ...) {
-  if (level < currentLevel_) {
+  if (level < currentLevel_.load(std::memory_order_relaxed)) {
     return;
   }
 
@@ -194,19 +195,27 @@ void LoggerService::LogFormat(LogLevel level, const char *format, ...) {
 }
 
 void LoggerService::InfoFormat(const char *format, ...) {
-  if (LogLevel::Info < currentLevel_)
+  if (LogLevel::Info < currentLevel_.load(std::memory_order_relaxed))
     return;
 
   va_list args;
   va_start(args, format);
+  va_list argsCopy;
+  va_copy(argsCopy, args);
 
-  // 使用更安全的初始长度，并确保 va_end 总是被执行
-  char buffer[1024] = {0};
+  char buffer[1024];
   int ret = vsnprintf(buffer, sizeof(buffer), format, args);
   va_end(args);
 
-  if (ret > 0) {
-    this->Info(buffer);
+  // Fix 4: If truncated, dynamically allocate a larger buffer
+  if (ret >= static_cast<int>(sizeof(buffer))) {
+    std::vector<char> dynBuf(ret + 1);
+    vsnprintf(dynBuf.data(), dynBuf.size(), format, argsCopy);
+    va_end(argsCopy);
+    Info(dynBuf.data());
+  } else {
+    va_end(argsCopy);
+    if (ret > 0) Info(buffer);
   }
 }
 
@@ -233,13 +242,13 @@ void LoggerService::ErrorFormat(const char *format, ...) {
 }
 
 void LoggerService::SetLevel(LogLevel level) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  currentLevel_ = level;
+  // Fix 5: currentLevel_ is now atomic, no mutex needed
+  currentLevel_.store(level, std::memory_order_release);
 }
 
 LogLevel LoggerService::GetLevel() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return currentLevel_;
+  // Fix 5: currentLevel_ is now atomic, no mutex needed
+  return currentLevel_.load(std::memory_order_acquire);
 }
 
 void LoggerService::SetLogFile(const char *filePath) {
@@ -283,6 +292,11 @@ const char *LoggerService::GetTimestampFormat() const {
 }
 
 void LoggerService::Flush() {
+  // Fix 4.1: If async logging is enabled, wait for queue to drain using condition variable
+  if (asyncEnabled_.load()) {
+    std::unique_lock<std::mutex> qlock(queueMutex_);
+    flushCondition_.wait(qlock, [this] { return logQueue_.empty(); });
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   if (logFile_.is_open()) {
     logFile_.flush();
@@ -306,12 +320,8 @@ void LoggerService::EnableAsyncLogging(bool enable) {
       queueCondition_.notify_all();
       logThread_.join();
     }
-    // 处理剩余的日志消息
-    std::lock_guard<std::mutex> lock(queueMutex_);
-    while (!logQueue_.empty()) {
-      processLogMessage(logQueue_.front());
-      logQueue_.pop_front();
-    }
+    // Fix #5: Worker already drains queue before exit; removed redundant double-drain
+    // that risked ABBA deadlock with processLogMessage's internal mutex_
   }
 }
 
@@ -340,6 +350,9 @@ void LoggerService::asyncLogWorker() {
 
       lock.lock(); // 重新锁定以检查队列状态
     }
+
+    // Fix 4.1: Notify Flush() that queue is now empty
+    flushCondition_.notify_all();
   }
 }
 

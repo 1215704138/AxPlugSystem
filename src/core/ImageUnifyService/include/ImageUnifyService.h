@@ -65,6 +65,7 @@ struct FrameItem {
     void*  ownedData;
     size_t ownedDataSize;
     std::vector<std::shared_ptr<ViewCacheItem>> views;
+    std::mutex itemMutex;  // Fix #2: Per-item lock for fine-grained GetView
 
     FrameItem() : ownedData(nullptr), ownedDataSize(0) {}
     ~FrameItem() = default;  // 内存由服务统一回收
@@ -134,10 +135,14 @@ private:
         lastError_ = msg;
     }
 
+    // Fix 2.2: Orphaned views with refCount > 0 deferred for cleanup
+    std::vector<std::shared_ptr<ViewCacheItem>> orphanedViews_;
+
     // 内部方法
     void* poolAlloc(size_t size);
     void  poolFree(void* ptr, size_t size);
     void  freeFrameData(FrameItem& frame);
+    void  cleanupOrphanedViews();
 
     std::shared_ptr<ViewCacheItem> findOrCreateView(FrameItem& frame,
                                                      MemoryLayout targetLayout);

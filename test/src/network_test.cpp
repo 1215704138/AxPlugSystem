@@ -253,9 +253,9 @@ void testServerClientInteraction() {
       }
     }
 
-    // 断开客户端连接 (DisconnectClient already deletes the object)
+    // 断开客户端连接 (shared_ptr will release when scope ends)
     server->DisconnectClient(serverClient);
-    serverClient = nullptr;
+    serverClient.reset();
     std::cout << "✅ 服务器已断开客户端连接" << std::endl;
   } else {
     std::cout << "ℹ️  服务器未接受到连接（可能需要更长时间）" << std::endl;

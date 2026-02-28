@@ -2,6 +2,7 @@
 #include "../AxPlug/IAxObject.h"
 #include "ITcpClient.h"
 #include <stdint.h>
+#include <memory>
 
 // TCP服务器接口
 class ITcpServer : public IAxObject {
@@ -14,9 +15,9 @@ public:
     virtual bool IsRunning() const = 0;
     
     // 连接管理
-    virtual ITcpClient* Accept() = 0;  // 返回新的客户端连接
-    virtual ITcpClient* GetClient(int index) = 0;  // 通过索引获取客户端
-    virtual bool DisconnectClient(ITcpClient* client) = 0;
+    virtual std::shared_ptr<ITcpClient> Accept() = 0;  // 返回新的客户端连接
+    virtual std::shared_ptr<ITcpClient> GetClient(int index) = 0;  // 通过索引获取客户端
+    virtual bool DisconnectClient(const std::shared_ptr<ITcpClient>& client) = 0;
     virtual bool DisconnectAllClients() = 0;
     
     // 服务器信息

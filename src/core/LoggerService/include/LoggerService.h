@@ -27,7 +27,7 @@ public:
     using InterfaceType = ILoggerService;
     
 private:
-    LogLevel currentLevel_;
+    std::atomic<LogLevel> currentLevel_;
     std::string logFilePath_;
     bool consoleOutputEnabled_;
     std::string timestampFormat_;
@@ -39,6 +39,7 @@ private:
     std::deque<LogMessage> logQueue_;
     std::mutex queueMutex_;
     std::condition_variable queueCondition_;
+    std::condition_variable flushCondition_;  // Fix 4.1: Replace busy-wait in Flush()
     std::thread logThread_;
     std::atomic<bool> stopFlag_;
     std::mutex asyncStateMutex_;  // Fix 2.1: Protects EnableAsyncLogging Check-Then-Act
@@ -100,10 +101,21 @@ public:
     }
     
     virtual void OnShutdown() override {
-        // 停止异步日志系统，确保所有日志都被写入
-        Flush();
+        // Fix 3: Stop async log thread before join to prevent deadlock
+        if (asyncEnabled_.load()) {
+            {
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                stopFlag_ = true;
+            }
+            queueCondition_.notify_all();
+        }
         if (logThread_.joinable()) {
             logThread_.join();
+        }
+        // Flush remaining file buffer
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (logFile_.is_open()) {
+            logFile_.flush();
         }
     }
     

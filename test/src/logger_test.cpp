@@ -42,16 +42,16 @@ void testDifferentServiceNames() {
         "test2"
     };
     
-    std::vector<ILoggerService*> loggers;
+    std::vector<std::shared_ptr<ILoggerService>> loggers;
     
     // 使用不同的服务名创建多个单例
     for (const char* serviceName : serviceNames) {
         std::cout << "\n创建服务实例，serviceName: " << serviceName << std::endl;
         
-        auto* logger = AxPlug::GetService<ILoggerService>(serviceName);
+        auto logger = AxPlug::GetService<ILoggerService>(serviceName);
         if (logger) {
             loggers.push_back(logger);
-            std::cout << "✅ 创建成功，地址: " << logger << std::endl;
+            std::cout << "✅ 创建成功，地址: " << logger.get() << std::endl;
             
             // 🔧 临时禁用控制台输出，验证是否为I/O阻塞问题
             logger->EnableConsoleOutput(false);
@@ -86,9 +86,9 @@ void testDifferentServiceNames() {
     // 测试GetServiceInstance
     std::cout << "\n测试GetServiceInstance..." << std::endl;
     for (const char* serviceName : serviceNames) {
-        auto* logger = AxPlug::GetService<ILoggerService>(serviceName);
+        auto logger = AxPlug::GetService<ILoggerService>(serviceName);
         if (logger) {
-            std::cout << "✅ 获取服务 " << serviceName << " 成功，地址: " << logger << std::endl;
+            std::cout << "✅ 获取服务 " << serviceName << " 成功，地址: " << logger.get() << std::endl;
         } else {
             std::cout << "❌ 获取服务 " << serviceName << " 失败" << std::endl;
         }
@@ -110,20 +110,20 @@ void testSameServiceNameReuse() {
     
     // 第一次创建
     std::cout << "第一次创建..." << std::endl;
-    auto* logger1 = AxPlug::GetService<ILoggerService>(serviceName);
+    auto logger1 = AxPlug::GetService<ILoggerService>(serviceName);
     if (logger1) {
-        std::cout << "✅ 第一次创建成功，地址: " << logger1 << std::endl;
+        std::cout << "✅ 第一次创建成功，地址: " << logger1.get() << std::endl;
         logger1->Info("第一次创建的日志");
     }
     
     // 第二次创建（应该返回同一实例）
     std::cout << "第二次创建同名服务..." << std::endl;
-    auto* logger2 = AxPlug::GetService<ILoggerService>(serviceName);
+    auto logger2 = AxPlug::GetService<ILoggerService>(serviceName);
     if (logger2) {
-        std::cout << "✅ 第二次创建成功，地址: " << logger2 << std::endl;
+        std::cout << "✅ 第二次创建成功，地址: " << logger2.get() << std::endl;
         logger2->Info("第二次创建的日志");
         
-        if (logger1 == logger2) {
+        if (logger1.get() == logger2.get()) {
             std::cout << "✅ 两次创建返回同一实例（单例模式正常）" << std::endl;
         } else {
             std::cout << "⚠️  两次创建返回不同实例（单例模式异常）" << std::endl;
@@ -132,10 +132,10 @@ void testSameServiceNameReuse() {
     
     // 使用GetServiceInstance
     std::cout << "使用GetServiceInstance..." << std::endl;
-    auto* logger3 = AxPlug::GetService<ILoggerService>(serviceName);
+    auto logger3 = AxPlug::GetService<ILoggerService>(serviceName);
     if (logger3) {
-        std::cout << "✅ GetServiceInstance成功，地址: " << logger3 << std::endl;
-        if (logger1 == logger3) {
+        std::cout << "✅ GetServiceInstance成功，地址: " << logger3.get() << std::endl;
+        if (logger1.get() == logger3.get()) {
             std::cout << "✅ GetServiceInstance返回同一实例" << std::endl;
         }
     }
@@ -146,10 +146,10 @@ void testSameServiceNameReuse() {
     
     // 销毁后重新创建
     std::cout << "销毁后重新创建..." << std::endl;
-    auto* logger4 = AxPlug::GetService<ILoggerService>(serviceName);
+    auto logger4 = AxPlug::GetService<ILoggerService>(serviceName);
     if (logger4) {
-        std::cout << "✅ 重新创建成功，地址: " << logger4 << std::endl;
-        if (logger1 != logger4) {
+        std::cout << "✅ 重新创建成功，地址: " << logger4.get() << std::endl;
+        if (logger1.get() != logger4.get()) {
             std::cout << "✅ 重新创建返回新实例（正常）" << std::endl;
         } else {
             std::cout << "⚠️  重新创建返回旧实例（异常）" << std::endl;
@@ -165,7 +165,7 @@ void testBasicLogging() {
     
     // 创建日志服务实例
     std::cout << "创建LoggerService..." << std::endl;
-    auto* logger = AxPlug::GetService<ILoggerService>("basic_test");
+    auto logger = AxPlug::GetService<ILoggerService>("basic_test");
     if (!logger) {
         std::cout << "❌ LoggerService创建失败" << std::endl;
         return;
@@ -198,7 +198,7 @@ void testBasicLogging() {
 void testLogLevelControl() {
     std::cout << "\n=== 日志级别控制测试 ===" << std::endl;
     
-    auto* logger = AxPlug::GetService<ILoggerService>("level_test");
+    auto logger = AxPlug::GetService<ILoggerService>("level_test");
     if (!logger) {
         std::cout << "❌ LoggerService创建失败" << std::endl;
         return;
@@ -238,7 +238,7 @@ void testLogLevelControl() {
 void testConsoleOutput() {
     std::cout << "\n=== 控制台输出控制测试 ===" << std::endl;
     
-    auto* logger = AxPlug::GetService<ILoggerService>("console_test");
+    auto logger = AxPlug::GetService<ILoggerService>("console_test");
     if (!logger) {
         std::cout << "❌ LoggerService创建失败" << std::endl;
         return;
@@ -270,7 +270,7 @@ void testConsoleOutput() {
 void testTimestampFormat() {
     std::cout << "\n=== 时间戳格式测试 ===" << std::endl;
     
-    auto* logger = AxPlug::GetService<ILoggerService>("timestamp_test");
+    auto logger = AxPlug::GetService<ILoggerService>("timestamp_test");
     if (!logger) {
         std::cout << "❌ LoggerService创建失败" << std::endl;
         return;
@@ -302,7 +302,7 @@ void testTimestampFormat() {
 void testFileLogging() {
     std::cout << "\n=== 文件日志测试 ===" << std::endl;
     
-    auto* logger = AxPlug::GetService<ILoggerService>("file_test");
+    auto logger = AxPlug::GetService<ILoggerService>("file_test");
     if (!logger) {
         std::cout << "❌ LoggerService创建失败" << std::endl;
         return;
@@ -334,7 +334,7 @@ void testFileLogging() {
 void testHighVolumeLogging() {
     std::cout << "\n=== 高频日志测试 ===" << std::endl;
     
-    auto* logger = AxPlug::GetService<ILoggerService>("volume_test");
+    auto logger = AxPlug::GetService<ILoggerService>("volume_test");
     if (!logger) {
         std::cout << "❌ LoggerService创建失败" << std::endl;
         return;
@@ -376,7 +376,7 @@ void testSingleCreateDestroy() {
     auto start = std::chrono::high_resolution_clock::now();
     
     // 创建日志服务
-    auto* logger = AxPlug::GetService<ILoggerService>("single_test");
+    auto logger = AxPlug::GetService<ILoggerService>("single_test");
     if (!logger) {
         std::cout << "❌ 创建失败" << std::endl;
         return;
@@ -407,7 +407,7 @@ void testMultipleCreateDestroy() {
     
     for (int i = 0; i < iterations; i++) {
         // 创建
-        auto* logger = AxPlug::GetService<ILoggerService>("multi_test");
+        auto logger = AxPlug::GetService<ILoggerService>("multi_test");
         if (!logger) {
             std::cout << "❌ 第 " << i << " 次创建失败" << std::endl;
             continue;
@@ -440,7 +440,7 @@ void testConcurrentServices() {
     
     const int serviceCount = 5;
     std::vector<std::string> serviceNames;
-    std::vector<ILoggerService*> loggers;
+    std::vector<std::shared_ptr<ILoggerService>> loggers;
     
     // 同时创建多个不同名的服务
     for (int i = 0; i < serviceCount; i++) {
@@ -448,10 +448,10 @@ void testConcurrentServices() {
         serviceNames.push_back(serviceName);
         
         std::cout << "创建服务: " << serviceName << std::endl;
-        auto* logger = AxPlug::GetService<ILoggerService>(serviceName.c_str());
+        auto logger = AxPlug::GetService<ILoggerService>(serviceName.c_str());
         if (logger) {
             loggers.push_back(logger);
-            std::cout << "✅ 创建成功，地址: " << logger << std::endl;
+            std::cout << "✅ 创建成功，地址: " << logger.get() << std::endl;
             logger->Info(fmt("并发服务 %s", serviceName.c_str()).c_str());
         } else {
             std::cout << "❌ 创建失败" << std::endl;

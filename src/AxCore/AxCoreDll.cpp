@@ -96,6 +96,14 @@ extern "C" {
         AxPluginManager::Instance()->ReleaseSingletonById(typeId, serviceName);
     }
 
+    AX_CORE_API IAxObject* Ax_AcquireSingletonById(uint64_t typeId, const char* serviceName) {
+        return AxPluginManager::Instance()->AcquireSingletonById(typeId, serviceName);
+    }
+
+    AX_CORE_API void Ax_ReleaseSingletonRef(uint64_t typeId, const char* serviceName) {
+        AxPluginManager::Instance()->ReleaseSingletonRef(typeId, serviceName);
+    }
+
     // ========== Introspection API ==========
 
     AX_CORE_API int Ax_FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount) {

@@ -27,6 +27,7 @@ protected:
 
 private:
     SOCKET socket_;
+    std::mutex socketMutex_;  // Fix 7/C: protect socket_ against concurrent Disconnect/Send/Receive
     std::atomic<bool> isConnected_;  // Fix 2.4: atomic for thread safety
     int timeout_;
     int bufferSize_;
@@ -81,6 +82,7 @@ public:
 class TcpServer : public ITcpServer {
 private:
     SOCKET listenSocket_;
+    mutable std::mutex listenMutex_;  // Fix D: protect listenSocket_ against concurrent Accept/StopListening
     std::atomic<bool> isListening_;   // Fix 2.4: atomic for thread safety
     std::atomic<bool> isRunning_;    // Fix 2.4: atomic for thread safety
     int maxConnections_;
@@ -123,9 +125,9 @@ protected:
     bool IsListening() const override;
     bool IsRunning() const override;
     
-    ITcpClient* Accept() override;
-    ITcpClient* GetClient(int index) override;
-    bool DisconnectClient(ITcpClient* client) override;
+    std::shared_ptr<ITcpClient> Accept() override;
+    std::shared_ptr<ITcpClient> GetClient(int index) override;
+    bool DisconnectClient(const std::shared_ptr<ITcpClient>& client) override;
     bool DisconnectAllClients() override;
     
     const char* GetListenAddress() const override;

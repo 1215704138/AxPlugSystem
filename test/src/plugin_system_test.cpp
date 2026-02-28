@@ -97,7 +97,7 @@ void testService() {
 
   // 获取 Service 单例 (全局唯一)
   // 第一次调用会自动创建
-  auto *logger = AxPlug::GetService<ILoggerService>();
+  auto logger = AxPlug::GetService<ILoggerService>();
   if (!logger) {
     std::cout << "LoggerPlugin Service 获取失败" << std::endl;
     return;
@@ -111,9 +111,8 @@ void testService() {
   logger->Log(LogLevel::Error, "This is an error message");
 
   // 再次获取应该返回同一个实例
-  auto *logger2 = AxPlug::GetService<ILoggerService>();
-  std::cout << "单例一致性检查: " << (logger == logger2 ? "通过" : "失败")
-            << std::endl;
+  auto logger2 = AxPlug::GetService<ILoggerService>();
+  std::cout << "单例一致性检查: " << (logger.get() == logger2.get() ? "通过" : "失败") << std::endl;
 
   // Service 不需要手动释放，由 PluginManager 管理
   // 但可以显式释放
@@ -182,10 +181,8 @@ void testNewFeatures() {
   // Test 1: TryGetService noexcept API
   std::cout << "[1] TryGetService 测试:" << std::endl;
   // 明确指定使用返回 pair 的重载
-  auto logger_result = static_cast<std::pair<ILoggerService*, AxInstanceError> (*)(const char*)>(
-      AxPlug::TryGetService<ILoggerService>
-  )("test");
-  auto* logger = logger_result.first;
+  auto logger_result = AxPlug::TryGetService<ILoggerService>("test");
+  auto logger = logger_result.first;
   auto error = logger_result.second;
   if (error == AxInstanceError::kSuccess && logger) {
     std::cout << "  获取成功" << std::endl;

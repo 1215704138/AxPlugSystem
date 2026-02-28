@@ -100,8 +100,8 @@ bool BoostUdpSocket::SendTo(const char* host, int port, const uint8_t* data, siz
     }
     
     try {
+        std::lock_guard<std::mutex> lock(io_mutex_);
         auto endpoint = ResolveEndpoint(host, port);
-        
         boost::system::error_code ec;
         size_t bytes_sent = socket_->send_to(boost::asio::buffer(data, len), endpoint, 0, ec);
         
@@ -131,11 +131,13 @@ bool BoostUdpSocket::Receive(uint8_t* buffer, size_t maxLen, size_t& outLen) {
     }
     
     try {
-        boost::system::error_code ec;
         boost::asio::ip::udp::endpoint sender_endpoint;
-        
-        size_t bytes_received = socket_->receive_from(
-            boost::asio::buffer(buffer, maxLen), sender_endpoint, 0, ec);
+        size_t bytes_received;
+        boost::system::error_code ec;
+        {
+            std::lock_guard<std::mutex> lock(io_mutex_);
+            bytes_received = socket_->receive_from(boost::asio::buffer(buffer, maxLen), sender_endpoint, 0, ec);
+        }
         
         if (ec) {
             UpdateError(ec);
@@ -190,10 +192,10 @@ bool BoostUdpSocket::EnableBroadcast(bool enable) {
     broadcast_enabled_ = enable;
     
     if (socket_ && socket_->is_open()) {
+        std::lock_guard<std::mutex> lock(io_mutex_);
         boost::asio::socket_base::broadcast option(enable);
         boost::system::error_code ec;
         socket_->set_option(option, ec);
-        
         if (ec) {
             UpdateError(ec);
             return false;
@@ -301,10 +303,10 @@ void BoostUdpSocket::SetTTL(int ttl) {
     ttl_ = std::max(1, std::min(255, ttl));
     
     if (socket_ && socket_->is_open()) {
+        std::lock_guard<std::mutex> lock(io_mutex_);
         boost::asio::ip::multicast::hops option(ttl_);
         boost::system::error_code ec;
         socket_->set_option(option, ec);
-        
         if (ec) {
             UpdateError(ec);
         }
@@ -461,14 +463,11 @@ void BoostUdpSocket::SetSocketBufferSizes() {
     if (!socket_ || !socket_->is_open()) return;
     
     try {
-        // 设置发送缓冲区
+        std::lock_guard<std::mutex> lock(io_mutex_);
         boost::asio::socket_base::send_buffer_size send_option(buffer_size_);
         socket_->set_option(send_option);
-        
-        // 设置接收缓冲区
         boost::asio::socket_base::receive_buffer_size recv_option(buffer_size_);
         socket_->set_option(recv_option);
-        
     } catch (const std::exception& e) {
         // 忽略缓冲区设置错误
     }

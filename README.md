@@ -1,58 +1,126 @@
-# AxPlug v3 插件框架
+# AxPlug 插件框架
 
-AxPlug 是一个现代化的工业级 C++17 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。
+AxPlug 是一个现代化的工业级 C++17 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。框架提供 Tool（多实例工具）和 Service（全局单例服务）两种插件类型，内置事件总线、性能分析器、跨 DLL 异常处理，以及高性能图像格式统一服务。
 
-**v3 核心升级：**
-- **智能指针** (`AxPtr<T>` / `shared_ptr`) 自动引用计数 + 手动 `DestroyTool` 双模式
-- **内置 Profiler** 生成 Chrome trace.json，RAII 宏 `AX_PROFILE_SCOPE`
-- **跨模块异常保护** `AxExceptionGuard` + 线程局部错误存储
-- **高性能并发** `shared_mutex` 读写锁 + typeId FNV-1a O(1) 热路径
+---
 
 ## 📚 文档索引
 
-- **[快速入门 & 使用手册](docs/AxPlug.md)**：适合使用者，包含框架简介、核心概念、快速上手指南。
-- **[开发与维护手册](docs/AxPlug_Dev.md)**：适合框架开发者，包含内部架构、源码结构、构建系统详解。
-- **[框架对比报告](framework_comparison.md)**：AxPlug v3 vs z3y_plugin_framework 详细对比。
-- **[ImageUnifyService 开发手册](docs/ImageUnifyService_Dev.md)**：核心图像服务插件的详细设计与优化说明。
-- **[发布与集成指南](docs/Release_Guide.md)**：包含 SDK 生成、目录结构及开发者集成说明。
-- **[CMake 构建选项说明](docs/build_options.md)**：包含如何开启/关闭测试编译等构建参数说明。
+### 使用手册（面向框架使用者）
 
+| 文档 | 说明 |
+|------|------|
+| **[AxPlug.md](docs/AxPlug.md)** | **核心必读** — 框架使用指南、API 参考、插件开发流程 |
+| **[EventBus.md](docs/EventBus.md)** | 事件总线使用说明：订阅/发布、同步/异步、网络事件 |
+| **[ImageUnifyService.md](docs/ImageUnifyService.md)** | 图像统一服务使用说明：API、第三方库集成、性能参考 |
+
+### 开发者手册（面向框架维护者 / 新手交接）
+
+| 文档 | 说明 |
+|------|------|
+| **[AxPlug_DEV.md](docs/AxPlug_Dev.md)** | 框架底层架构、源码结构、线程安全、构建系统详解 |
+| **[EventBus_DEV.md](docs/EventBus_DEV.md)** | 事件总线内部实现：COW 机制、MPSC 队列、锁策略 |
+| **[ImageUnifyService_DEV.md](docs/ImageUnifyService_DEV.md)** | 图像服务内部实现：内存池、SIMD 优化、布局预测 |
+
+### 其他
+
+| 文档 | 说明 |
+|------|------|
+| **[Release_Guide.md](docs/Release_Guide.md)** | SDK 发布流程、目录结构、外部项目集成指南 |
+| **[build_options.md](docs/build_options.md)** | CMake 构建选项说明（测试开关、编译配置等） |
+
+---
 
 ## 🚀 快速构建
 
-本项目使用 CMake 构建，并提供了自动化脚本简化流程 (Windows + MSVC)。
+本项目使用 CMake 构建，提供自动化脚本简化流程（Windows + MSVC）。
 
-### 1. 生成 SDK (发布包)
+### 1. 构建框架
 
-运行以下脚本，将在 `publish/` 目录下生成头文件、库文件和 DLL：
+```bash
+# Debug 构建（不含测试）
+scripts\build_debug_no_test.bat
 
-- **Debug 版本**: `scripts\build_publish_debug.bat`
-- **Release 版本**: `scripts\build_publish_release.bat`
+# Release 构建（不含测试）
+scripts\build_release_no_test.bat
+```
 
-### 2. 运行测试
+### 2. 构建并运行测试
 
-在生成 SDK 后，可以独立构建并运行测试程序：
+```bash
+# Debug 构建 + 测试
+scripts\build_debug_with_test.bat
 
-- **构建测试**: `scripts\build_test.bat`
-- **运行 Demo**: 
-  - `test\build\bin\plugin_system_test.exe`
-  - `test\build\bin\logger_test.exe`
+# Release 构建 + 测试
+scripts\build_release_with_test.bat
+```
+
+### 3. 手动 CMake 构建
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+cmake --install build --config Release --prefix publish
+```
+
+---
 
 ## 📂 目录结构
 
 ```
-AxPlug/
-├── include/           # 公共接口头文件
-├── src/               # 源代码 (AxCore, 插件实现)
-├── test/              # 测试程序 (依赖 publish/)
-├── scripts/           # 自动化构建脚本
-├── docs/              # 详细文档
-├── publish/           # (自动生成) SDK 发布目录
-└── build/             # (自动生成) 中间构建目录
+AxPlugSystem/
+├── include/              # 公共接口头文件
+│   ├── AxPlug/           #   框架核心接口 (AxPlug.h, IAxObject.h, AxEventBus.h ...)
+│   └── core/             #   内置服务接口 (IImageUnifyService.h, LoggerService.h ...)
+├── src/                  # 源代码
+│   ├── AxCore/           #   框架核心实现 (AxPluginManager, DefaultEventBus ...)
+│   └── core/             #   内置插件实现 (LoggerService, ImageUnifyService, NetworkEventBus)
+├── test/                 # 测试程序
+├── scripts/              # 自动化构建脚本
+├── deps/                 # 第三方依赖 (OpenCV 等)
+├── docs/                 # 详细文档
+├── build/                # (自动生成) 中间构建目录
+└── publish/              # (自动生成) SDK 发布目录
 ```
+
+---
 
 ## 🛠️ 环境要求
 
-- Windows 10/11
-- Visual Studio 2022 (MSVC)
-- CMake 3.15+
+| 要求 | 最低版本 |
+|------|---------|
+| 操作系统 | Windows 10 / 11 |
+| 编译器 | Visual Studio 2019+（推荐 2022） |
+| CMake | 3.15+ |
+| C++ 标准 | C++17 |
+| 运行时 | `/MD`（Release）或 `/MDd`（Debug） |
+
+---
+
+## ⚡ 快速体验
+
+```cpp
+#include <AxPlug/AxPlug.h>
+#include "core/IImageUnifyService.h"
+
+int main() {
+    AxPlug::Init("plugins");
+
+    // 获取图像统一服务
+    auto imgSvc = AxPlug::GetService<IImageUnifyService>();
+
+    // 使用事件总线
+    auto conn = AxPlug::Subscribe("my_event", [](const AxPlug::AxEvent& e) {
+        // 处理事件 ...
+    });
+    AxPlug::Publish("my_event", AxPlug::AxEvent{});
+
+    return 0;
+}
+```
+
+---
+
+## 📄 License
+
+详见 [LICENSE](LICENSE) 文件。

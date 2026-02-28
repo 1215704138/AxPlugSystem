@@ -1,620 +1,380 @@
-# ImageUnifyService 开发者维护手册
+# ImageUnifyService 图像统一服务 · 0基础开发交接指南
 
-> v1.0 | 开发者维护手册
-
----
-
-## 1. 架构总览
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      用户代码                            │
-│   ScopedFrame / ScopedView / Unify::ToCvMat() ...      │
-├─────────────────────────────────────────────────────────┤
-│               IImageUnifyService (接口层)                │
-│   include/core/IImageUnifyService.h  (~290行)           │
-│   6个虚方法 + 2个RAII类 + 工具函数                       │
-├─────────────────────────────────────────────────────────┤
-│               ImageUnifyService (实现层)                 │
-│   src/core/ImageUnifyService/                           │
-│   ├── include/ImageUnifyService.h   (内部数据结构)       │
-│   ├── src/ImageUnifyService.cpp     (核心逻辑~630行)     │
-│   └── src/module.cpp                (插件导出)           │
-├─────────────────────────────────────────────────────────┤
-│  ┌──────────────┐ ┌────────────┐ ┌───────────────────┐  │
-│  │AlignedMemPool│ │LayoutTrans │ │ 预取引擎(predict) │  │
-│  │ 64B对齐      │ │ SSE预取    │ │ 统计+预转换       │  │
-│  │ 6级桶       │ │ 4x展开     │ │ 70%阈值           │  │
-│  │ 复用回收     │ │ 分块+特化  │ │                   │  │
-│  └──────────────┘ └────────────┘ └───────────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│               Unify.hpp (便捷适配层)                     │
-│   条件编译: OpenCV / Halcon / Qt 便捷函数                │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 1.1 文件清单
-
-| 文件 | 职责 | 行数 |
-|------|------|------|
-| `include/core/IImageUnifyService.h` | 公开接口 + RAII类 + 枚举/结构体 | ~244 |
-| `include/core/Unify.hpp` | OpenCV/Halcon/Qt便捷转换函数 | ~136 |
-| `include/core/UnifyToCv.hpp` | 向后兼容重定向(→Unify.hpp) | 7 |
-| `include/core/UnifyToHalcon.hpp` | 向后兼容重定向(→Unify.hpp) | 7 |
-| `include/core/UnifyToQt.hpp` | 向后兼容重定向(→Unify.hpp) | 7 |
-| `src/.../include/ImageUnifyService.h` | 内部数据结构 + AlignedMemoryPool | ~148 |
-| `src/.../src/ImageUnifyService.cpp` | 服务实现 + 6项优化 | ~628 |
-| `src/.../src/module.cpp` | 插件导出宏 | 7 |
-| `test/image_unify_test.cpp` | 11个测试用例 | ~1000+ |
-
-### 1.2 核心设计决策
-
-| 决策 | 选择 | 原因 |
-|------|------|------|
-| 数据所有权 | 服务拷贝数据(融合路径直接I→P转换, 常规路径memcpy) | 解耦调用方buffer, 避免悬空指针 |
-| 视图生命周期 | 引用计数 + 帧绑定双重机制 | `ReleaseView`递减引用, `RemoveFrame`强制释放 |
-| 内存分配 | 64字节对齐内存池 (`AlignedMemoryPool`) | 消除malloc抖动, 缓存行对齐, 内存复用 |
-| 内存回收 | LRU视图淘汰 → FIFO帧淘汰 两级策略 | 先淘汰零引用视图, 不够再淘汰整帧 |
-| 布局转换 | U8_C3 AVX2特化 + 全格式多线程 + NT存储 | 工业视觉最常用格式, Release下超越Halcon 2x |
-| 预测预取 | 统计布局请求比例, >70%时预转换 | 首次GetView延迟降为0 |
-| 锁策略 | `framesMutex_` + `errorMutex_` 双锁 | 不嵌套, 无死锁风险 |
+> 本文档面向刚接手本项目的开发者，帮助你快速理解图像统一服务的技术栈、底层实现原理、以及如何在此基础上进行维护和扩展。
 
 ---
 
-## 2. 接口API参考
+## 1. 技术栈总览
 
-### 2.1 IImageUnifyService (6个方法)
+| 技术 | 用途 | 在本系统中的位置 |
+|------|------|------------------|
+| **内存池 (Memory Pool)** | 64字节缓存行对齐分配，6级桶复用，消除 `malloc` 抖动 | `AlignedMemoryPool` 类 |
+| **SSSE3 SIMD** | 16像素/迭代的三通道交错↔平面布局转换 (`pshufb` 指令) | `I2P_U8C3_SSSE3_Row` / `P2I_U8C3_SSSE3_Row` |
+| **AVX2 SIMD** | 32像素/迭代的三通道去交错（2倍SSSE3吞吐量） | `I2P_U8C3_AVX2_Row` |
+| **Non-Temporal Store (NT)** | 大图写入跳过CPU缓存，减少~33%总线带宽占用 | `I2P_U8C3_AVX2_NT_Row` / `_mm256_stream_si256` |
+| **引用计数 + LRU 淘汰** | 视图缓存的生命周期管理和内存压力回收 | `ViewCacheItem::refCount` + `lastAccess` |
+| **持久线程池** | 消除 `std::thread` 创建/销毁开销，多线程并行布局转换 | `StaticThreadPool` |
+| **Cache Tiling 分块** | L1缓存友好的行分块处理 (64行/块) | `TILE_ROWS` 常量 |
+| **软件预取** | `_mm_prefetch` 提前将下一行数据加载到L1缓存 | `PREFETCH_READ` 宏 |
+| **布局预测预取** | 统计请求布局比例，>70%时提前转换 | `predictLayout()` / `prefetchView()` |
+| **`std::atomic` 内存计数** | O(1) 查询内存使用量替代 O(N×M) 遍历 | `memoryUsage_` |
+| **RAII 辅助类** | `ScopedFrame` / `ScopedView` 自动管理帧/视图生命周期 | `IImageUnifyService.h` |
+| **条件编译适配层** | `HAS_OPENCV` / `HAS_HALCON` / `QT_CORE_LIB` 按需编译便捷函数 | `Unify.hpp` |
 
-```cpp
-// ---- 帧管理 ----
-uint64_t SubmitFrame(void* data, int w, int h, PixelFormat fmt,
-                     MemoryLayout layout = Interleaved, int step = 0);
-void     RemoveFrame(uint64_t frameId);
-bool     HasFrame(uint64_t frameId) const;
+---
 
-// ---- 视图 ----
-ImageDescriptor GetView(uint64_t frameId, MemoryLayout targetLayout);
-void            ReleaseView(uint64_t frameId, void* viewPtr);
+## 2. 学习路线（推荐阅读顺序）
 
-// ---- 配置 ----
-void   SetMaxMemory(size_t maxBytes);   // 默认256MB
-size_t GetMemoryUsage() const;
-void   ClearCache();
+### 2.1 必备前置知识
 
-// ---- 错误 ----
-const char* GetLastError() const;
-```
+1. **图像基础** — 像素格式、通道数、行步长 (stride/step)、交错 vs 平面布局
+   - 推荐：OpenCV 官方教程 "Mat - The Basic Image Container"
+   - 重点理解：
+     - **Interleaved (交错)**：`[B0,G0,R0, B1,G1,R1, ...]` — OpenCV/Qt 使用
+     - **Planar (平面)**：`[B0,B1,B2,..., G0,G1,G2,..., R0,R1,R2,...]` — Halcon 使用
+     - **step/stride**：每行实际占用的字节数（可能因对齐而大于 `width * bytesPerPixel`）
 
-### 2.2 ImageDescriptor 通道访问器
+2. **C++ 内存管理** — `_aligned_malloc` / `posix_memalign`、缓存行对齐
+   - 推荐：《What Every Programmer Should Know About Memory》(Ulrich Drepper)
+   - 重点：为什么 64 字节对齐能提升性能（CPU 缓存行大小）
 
-Planar布局下, 可通过语义化方法直接获取通道指针:
+3. **SIMD 入门** — SSE/SSSE3/AVX2 intrinsic 函数
+   - 推荐：Intel Intrinsics Guide (https://www.intel.com/content/www/us/en/docs/intrinsics-guide/)
+   - 重点：`_mm_shuffle_epi8` (pshufb)、`_mm256_loadu2_m128i`、`_mm256_stream_si256`
+   - 不需要精通汇编，只需理解 "用一条指令同时处理16/32个字节" 的概念
 
-```cpp
-ScopedView planar(svc, frameId, MemoryLayout::Planar);
+4. **引用计数与 LRU 缓存**
+   - 搜索 "LRU Cache implementation C++" 了解基本原理
+   - 重点：引用计数 > 0 的项不可被淘汰
 
-// 语义化访问 (RGB场景)
-auto r = planar.R();       // uint8_t* 红色通道
-auto g = planar.G();       // uint8_t* 绿色通道
-auto b = planar.B();       // uint8_t* 蓝色通道
-auto a = planar.A();       // uint8_t* Alpha通道 (仅C4格式)
+5. **线程池模式**
+   - 推荐：搜索 "C++ thread pool pattern condition_variable"
+   - 重点：生产者-消费者模型、`condition_variable` 的 wait/notify
 
-// 通用访问 (index-based)
-auto ch = planar.Channel(2);  // 等价于 B()
-
-// Float32场景
-auto fR = planar.R<float>();   // float* 红色通道
-```
-
-**注意**: 仅Planar布局有效, Interleaved布局返回`nullptr`.
-
-### 2.3 RAII辅助类
-
-| 类 | 构造 | 析构 | 典型场景 |
-|---|---|---|---|
-| `ScopedFrame` | `SubmitFrame` | `RemoveFrame` | 单次处理的帧 |
-| `ScopedView` | `GetView` | `ReleaseView` | 临时获取某布局视图 |
-
-### 2.4 生命周期图
+### 2.2 代码阅读顺序
 
 ```
-SubmitFrame()        GetView(Planar)      GetView(Interleaved)
-    │                     │                      │
-    ▼                     ▼                      ▼
-┌─────────┐       ┌──────────────┐        ┌──────────────┐
-│ FrameItem│──────▶│ ViewCacheItem│        │  零拷贝返回   │
-│ ownedData│       │ refCount=1   │        │  原始dataPtr  │
-│ original │       │ lastAccess=T │        └──────────────┘
-└─────────┘       └──────────────┘
-    │                     │
-    │  ReleaseView()      │  refCount--
-    │                     │
-    │  内存压力 + refCount==0 → LRU淘汰视图(回收到池)
+第一轮：接口层（用户视角）
+  ① include/core/IImageUnifyService.h   ← 枚举/结构体/接口/RAII类/工具函数
+  ② include/core/Unify.hpp              ← OpenCV/Halcon/Qt 便捷转换函数
+
+第二轮：实现层（引擎内部）
+  ③ src/.../include/ImageUnifyService.h  ← 内部类声明：内存池、视图缓存项、帧数据项、布局转换器
+  ④ src/.../src/ImageUnifyService.cpp    ← 核心实现（按以下顺序阅读）:
+     a. AlignedMemoryPool 实现 (内存池)
+     b. StaticThreadPool 实现 (线程池)
+     c. SSSE3/AVX2 SIMD 转换函数
+     d. LayoutTransformer 通用模板
+     e. ImageUnifyService 主服务方法
+
+第三轮：插件注册
+  ⑤ src/.../src/module.cpp              ← AX_AUTO_REGISTER_SERVICE + AX_DEFINE_PLUGIN_ENTRY
+```
+
+---
+
+## 3. 核心机制深度解析
+
+### 3.1 数据流概览
+
+```
+用户图像数据 (any format)
+      │
+      ▼
+  SubmitFrame()  ──────► 拷贝数据到内存池分配的缓冲区
+      │                  记录原始布局 (Interleaved/Planar)
+      │                  返回 frameId
+      │
+      ▼
+  GetView(frameId, targetLayout)
+      │
+      ├─ 目标布局 == 原始布局？ ──► 零拷贝：直接返回原始数据指针
+      │
+      └─ 目标布局 != 原始布局？ ──► 查找缓存：已有相同布局视图？
+            │                           │
+            ├─ 缓存命中 ──────────────► refCount++, 更新 lastAccess, 返回
+            │
+            └─ 缓存未命中 ──► 分配新缓冲 → SIMD布局转换 → 存入缓存 → 返回
+                              │
+                              └─ 超内存限制？ → performMaintenance()
+                                    │
+                                    ├─ 第1级: evictZeroRefViews() — LRU淘汰零引用视图
+                                    └─ 第2级: FIFO帧淘汰 — 移除最老帧
+
+  ReleaseView(frameId, viewPtr)  ──► refCount--, 计数归零后缓存可被回收
+  RemoveFrame(frameId)           ──► 强制释放帧及所有视图
+```
+
+### 3.2 AlignedMemoryPool — 对齐内存池
+
+**为什么需要内存池？**
+工业视觉场景下，每秒提交 30-60 帧 1920×1080 图像（约 6MB/帧），频繁 `malloc/free` 会导致：
+- 分配延迟抖动（操作系统内核锁竞争）
+- 内存碎片化
+- 缓存不对齐（性能下降 10-30%）
+
+**设计**：
+
+```
+分配请求 size
     │
-    │  RemoveFrame() 或 FIFO自动淘汰
     ▼
-  全部释放 (ownedData + 所有views → 回收到内存池)
+BucketIndex(size) → 找到对应桶
+    │
+    ├─ 桶 0: ≤256KB    (工业相机小ROI)
+    ├─ 桶 1: ≤1MB      (640×480 灰度图)
+    ├─ 桶 2: ≤4MB      (1080p 灰度图)
+    ├─ 桶 3: ≤16MB     (1080p 三通道)
+    ├─ 桶 4: ≤64MB     (4K 三通道)
+    └─ 桶 5: >64MB     (直接分配，不缓存)
+
+Allocate(size):
+    1. 在对应桶中查找 >= size 的空闲块
+    2. 找到 → 复用（从桶中移除，返回指针）
+    3. 未找到 → _aligned_malloc(64, size)  新分配
+
+Deallocate(ptr, size):
+    1. 桶 < 5 且桶内空闲块 < 4 → 放回桶中复用
+    2. 否则 → _aligned_free(ptr) 直接释放
+```
+
+**防膨胀机制**：每桶最多保留 4 块空闲内存。
+
+### 3.3 SIMD 布局转换 — 分层架构
+
+```
+                    ┌─ AVX2 + NT Store (≥32像素对齐, 大图)
+                    │
+U8_C3 专用路径 ─────┼─ AVX2 常规 (≥32像素)
+(工业最常用)        │
+                    └─ SSSE3 (≥16像素) + 标量尾部
+                    
+通用路径 ──────────── 模板函数 (任意格式: U8_C1/C4, Float32)
+(分块 + 软件预取)       TILE_ROWS=64行/块
+                        4像素循环展开
+```
+
+**SSSE3 核心原理** (以 Interleaved→Planar 为例)：
+- 输入：48字节 = 16像素 × 3通道 = `[B0,G0,R0, B1,G1,R1, ...]`
+- 使用 `pshufb` 指令按预定义掩码抽取：
+  - 掩码1：从每个三元组中取第1个字节 → 得到 B 通道
+  - 掩码2：取第2个字节 → G 通道
+  - 掩码3：取第3个字节 → R 通道
+- 一次处理 16 像素（SSSE3）或 32 像素（AVX2）
+
+**AVX2 NT Store 原理**：
+- 普通 `_mm256_storeu_si256`：数据写入CPU缓存再刷回内存（写分配）
+- `_mm256_stream_si256`：数据绕过缓存直接写入内存（适合大块只写数据）
+- 效果：减少缓存污染，带宽占用降低约 33%
+
+### 3.4 多线程并行转换
+
+```
+StaticThreadPool::parallelFor(height, processRows)
+    │
+    ├─ 调用线程处理: rows [0, chunk)
+    ├─ Worker 0 处理: rows [chunk, 2*chunk)
+    ├─ Worker 1 处理: rows [2*chunk, 3*chunk)
+    └─ ...
+    
+触发条件: 像素总数 >= MT_PIXEL_THRESHOLD (200,000)
+          即约 450×450 以上的图像才启用多线程
+```
+
+**线程池特点**：
+- 持久线程，进程启动时创建，避免每次创建/销毁开销
+- 线程数 = `hardware_concurrency - 1`（留一个核给调用线程）
+- 使用 `generation_` 计数器替代逐个唤醒，减少 `notify` 次数
+- `submitMutex_` 防止并发 `parallelFor` 覆盖工作项
+
+### 3.5 布局预测预取
+
+```
+统计计数:
+  planarHits_++      (每次请求 Planar 布局)
+  interleavedHits_++ (每次请求 Interleaved 布局)
+
+predictLayout():
+  total = planarHits_ + interleavedHits_
+  if planarHits_ > total * 70%  → 预测下次请求 Planar
+  if interleavedHits_ > total * 70% → 预测下次请求 Interleaved
+
+SubmitFrame() 末尾:
+  如果能预测 → prefetchView() → 提前转换并缓存
+  效果: 后续 GetView() 直接缓存命中，延迟降为 0
 ```
 
 ---
 
-## 3. 已实现的11项优化
+## 4. 文件清单与职责
 
-### 3.1 [优化1] AlignedMemoryPool — 对齐内存池
-
-**位置**: `ImageUnifyService.h` (类定义) + `ImageUnifyService.cpp` (实现)
-
-**设计**:
-- 64字节缓存行对齐 (`_aligned_malloc` / `posix_memalign`)
-- 6级桶: ≤256KB, ≤1MB, ≤4MB, ≤16MB, ≤64MB, >64MB(直接分配)
-- 每桶最多保留4块空闲内存, 防止池膨胀
-- `Deallocate` 时优先放回桶中复用, 桶满则直接释放
-
-**效果**: 连续20帧提交耗时从45.6ms降至25.5ms (**1.8x**)
-
-**关键代码路径**:
-```
-SubmitFrame → poolAlloc(dataSize)    // 分配帧数据
-findOrCreateView → poolAlloc(dataSize) // 分配视图缓冲
-freeFrameData → poolFree(ptr, size)  // 回收到池
-```
-
-### 3.2 [优化2] 引用计数 + LRU视图淘汰
-
-**位置**: `ViewCacheItem::refCount` + `lastAccess` + `evictZeroRefViews()`
-
-**设计**:
-- `GetView` 时 `refCount++`, 更新 `lastAccess`
-- `ReleaseView` 时 `refCount--`
-- `performMaintenance` 内存压力时:
-  1. 先调用 `evictZeroRefViews()` 淘汰零引用视图 (LRU排序)
-  2. 仍不够则FIFO淘汰最老帧
-
-**两级回收策略**:
-```
-内存超限
-  → 第1级: evictZeroRefViews() — 淘汰refCount==0且最老的视图
-  → 第2级: FIFO帧淘汰 — 移除整个最老帧(含所有视图)
-```
-
-### 3.3 [优化3] 软件预取 + 4像素循环展开
-
-**位置**: `I2P_U8C3_Optimized()` + `P2I_U8C3_Optimized()`
-
-**技术**:
-- `_mm_prefetch(..., _MM_HINT_T0)` 预取下一行数据到L1缓存
-- 4像素展开: 消除内层 `for(c=0;c<3;++c)` 循环, 直接展开12个赋值
-- 使用 `__restrict` 指针提示编译器无别名, 允许更激进优化
-
-**效果**: 1920×1080×3 转换从0.15ms降至0.07ms (**2.1x**)
-
-### 3.4 [优化4] 分块处理 (Cache Tiling)
-
-**位置**: `I2P_Generic()` + `P2I_Generic()` 模板函数
-
-**设计**:
-- 以 `TILE_ROWS=64` 行为一块处理
-- 保证输入+输出数据在L1缓存内 (32KB / 2 ≈ 16KB per block)
-- 大图(如4K)的缓存命中率显著提高
-
-### 3.5 [优化5] 布局预测 + 预转换
-
-**位置**: `predictLayout()` + `prefetchView()`
-
-**设计**:
-- 用 `planarHits_` / `interleavedHits_` 原子计数器跟踪历史请求
-- 超过5次请求后开始预测; 某布局占比>70%则认定为"常用布局"
-- `SubmitFrame` 末尾调用 `prefetchView()`, 如果预测命中则立即预转换
-- 后续 `GetView` 命中缓存, 延迟降为~0.0003ms
-
-**适用场景**: 工业视觉中通常只用一种非原始布局(如Halcon用Planar), 预测准确率极高
-
-### 3.6 [优化6] 缓存行对齐分配
-
-**位置**: `AlignedAlloc()` / `AlignedFree()`
-
-**设计**:
-- Windows: `_aligned_malloc(size, 64)`
-- Linux: `posix_memalign(&ptr, 64, size)`
-- 所有帧数据和视图缓冲都64字节对齐
-- 消除跨缓存行访问的性能惩罚, 为未来SIMD指令(AVX-512)预留对齐条件
-
-### 3.7 [优化7] 原子内存计数器
-
-**位置**: `ImageUnifyService::memoryUsage_` (`std::atomic<size_t>`)
-
-**设计**: 原子变量替代O(N×M)遍历, 每次分配/释放时原子更新, `GetMemoryUsage()` O(1)无锁读取
-
-### 3.8 [优化8] 持久线程池 (StaticThreadPool)
-
-**位置**: `ImageUnifyService.cpp` — `StaticThreadPool` 类
-
-**问题**: 每次转换创建/销毁`std::thread`, 开销~200-400μs (Windows CreateThread + 栈分配 + TLS)
-
-**设计**:
-- 静态单例, `hardware_concurrency()-1` 个worker线程
-- condition_variable唤醒, 调用线程处理第一块
-- generation计数器避免虚假唤醒
-- 唤醒延迟<10μs vs 线程创建~300μs
-- **防死锁退出**：显式提供 `Shutdown()` 供宿主的 `OnShutdown` 钩子主动协同调用（安全执行 `join`）。其析构函数中则使用 `detach()` 兜底。此举一举消灭常态化隐匿极深的 Windows 平台跨库加载的后台线程剥离级死锁。
-
-**效果**: 布局转换从2.35ms降至~1.2ms
-
-### 3.9 [优化9] SSSE3 SIMD 三通道去交错
-
-**位置**: `I2P_U8C3_SSSE3_Row` / `P2I_U8C3_SSSE3_Row`
-
-**技术**: `pshufb` 16像素/迭代, 9 shuffle + 6 OR 从48字节提取3×16字节通道数据
-
-### 3.10 [优化10] AVX2 三通道去交错 + Non-Temporal Stores
-
-**位置**: `I2P_U8C3_AVX2_Row` / `I2P_U8C3_AVX2_NT_Row`
-
-**技术**:
-- `vpshufb`在每个128位lane内独立工作, lo=blockA(16px), hi=blockB(16px)
-- 相同SSSE3掩码同时处理两个16像素块, 32像素/迭代 (2x吞吐)
-- 运行时CPUID检测, 无AVX2自动降级到SSSE3
-- NT版本用`_mm256_stream_si256`跳过缓存写入, 减少~33%总线带宽 (需对齐)
-- 无padding时启用flat批量处理, 消除逐行循环开销
-
-**效果**: 10.5MB图像: Release下0.73ms vs Halcon 1.46ms, **超越Halcon 2x**
-
-### 3.11 [优化11] 融合SubmitFrame — 单次内存遍历
-
-**位置**: `ImageUnifyService::SubmitFrame()`
-
-**问题**: 原始流程做两次10.5MB内存遍历:
-1. `memcpy` 拷贝interleaved数据到ownedData
-2. `I2P` 将ownedData转换为planar视图
-
-**设计**:
-- 利用预测引擎判断下次GetView大概率请求Planar
-- 预测命中时, 跳过memcpy, 直接从用户buffer执行I→P转换存储为Planar
-- GetView(Planar)变为零拷贝返回 (frame.original已是Planar)
-- 预测未命中时退回常规memcpy路径
-
-**效果**: 完整流程从2.34ms降至1.34ms (Debug), 从1.34ms降至**0.725ms** (Release)
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `include/core/IImageUnifyService.h` | ~286 | 公开接口 + `PixelFormat`/`MemoryLayout` 枚举 + `ImageDescriptor` + RAII类 + 工具函数 |
+| `include/core/Unify.hpp` | ~154 | OpenCV/Halcon/Qt 便捷转换函数（条件编译） |
+| `include/core/UnifyToCv.hpp` | ~7 | 向后兼容重定向 → Unify.hpp |
+| `include/core/UnifyToHalcon.hpp` | ~7 | 向后兼容重定向 → Unify.hpp |
+| `include/core/UnifyToQt.hpp` | ~7 | 向后兼容重定向 → Unify.hpp |
+| `src/.../include/ImageUnifyService.h` | ~157 | 内部类：`AlignedMemoryPool`、`ViewCacheItem`、`FrameItem`、`LayoutTransformer`、主服务类 |
+| `src/.../src/ImageUnifyService.cpp` | ~1124 | 全部实现：内存池、线程池、SIMD转换、主服务逻辑 |
+| `src/.../src/module.cpp` | 6 | 插件注册入口 |
+| `src/.../CMakeLists.txt` | 33 | 构建配置 |
 
 ---
 
-## 4. 性能基准
+## 5. 在当前系统中如何使用
 
-### 4.1 微基准 (1920×1080 U8_C3)
-
-| 指标 | 性能耗时/吞吐量 |
-|------|---------|
-| I→P 单次 | **0.008 ms** |
-| 缓存命中 | **0.0001 ms** |
-| 吞吐量 | **754 GB/s** |
-
-### 4.2 真实图像对比 (7353×500 U8_C3, 10.5MB)
-
-#### Release 构建
-
-| 方法 | 单次耗时 | 吞吐量 | vs Halcon |
-|------|---------|--------|----------|
-| **插件完整流程 (Submit+GetView)** | **0.776 ms** | **13,549 MB/s** | **1.93x ✓** |
-| Halcon GenImageInterleaved | 1.496 ms | 7,031 MB/s | 1.00x |
-| 常规标量搬运 | 3.616 ms | 2,909 MB/s | — |
-
-#### Debug 构建
-
-| 方法 | 单次耗时 | 吞吐量 | vs Halcon |
-|------|---------|--------|----------|
-| **插件完整流程** | **1.29 ms** | **8,173 MB/s** | **1.22x ✓** |
-| Halcon | 1.57 ms | 6,690 MB/s | 1.00x |
-| 常规标量搬运 | 14.74 ms | 713 MB/s | — |
-
-**结论**: Release下完整流程优于Halcon处理效率.
-
-### 4.3 多格式转换性能 (1920×1080, Release)
-
-| 格式 | I→P (ms) | P→I (ms) | 数据量 (MB) |
-|------|---------|---------|----------|
-| U8_C1 | 0.11 | 0.30 | 1.98 |
-| U8_C3 | 0.34 | 1.05 | 5.93 |
-| U8_C4 | 2.13 | 3.57 | 7.91 |
-| Float32_C1 | 0.59 | 2.30 | 7.91 |
-| Float32_C3 | 3.18 | 5.19 | 23.73 |
-| Float32_C4 | 5.23 | 7.17 | 31.64 |
-
----
-
-## 5. 内部实现详解
-
-### 5.1 数据结构
+### 5.1 获取服务实例
 
 ```cpp
-// 内存池 (6级桶, 64字节对齐)
-class AlignedMemoryPool {
-    FreeEntry buckets_[6];  // ≤256KB/1MB/4MB/16MB/64MB/>64MB
-    mutex poolMutex_;
-};
+#include "AxPlug/AxPlug.h"
+#include "core/IImageUnifyService.h"
 
-// 视图缓存项 (带引用计数 + LRU时间戳)
-struct ViewCacheItem {
-    MemoryLayout layout;
-    void*  dataPtr;
-    size_t dataSize;
-    atomic<int> refCount;                    // [优化2] 引用计数
-    steady_clock::time_point lastAccess;     // [优化2] LRU时间戳
-};
-
-// 帧数据项
-struct FrameItem {
-    ImageDescriptor original;
-    void*  ownedData;              // 池分配的数据副本
-    size_t ownedDataSize;
-    vector<shared_ptr<ViewCacheItem>> views;
-};
+// 获取全局单例（Service 模式）
+auto svc = AxPlug::GetService<IImageUnifyService>();
 ```
 
-### 5.2 关键流程
-
-#### SubmitFrame 流程
-```
-1. 参数校验
-2. 计算 dataSize + planarSize
-3. predictLayout()                        ← [优化5] 预测
-4. 预测Planar且输入Interleaved?            ← [优化11] 融合判断
-   ├── YES: poolAlloc(planarSize) + I→P直接转换  ← 单次内存遍历!
-   └── NO:  poolAlloc(dataSize) + memcpy         ← 常规路径
-5. 生成唯一 frameId (atomic自增)
-6. 加锁 → 插入 frames_[id] + frameOrder_
-7. 释放锁 → performMaintenance()          ← [优化2] 两级GC
-8. 非融合路径: prefetchView(frame)         ← [优化5] 预转换
-9. 返回 frameId
-```
-
-#### GetView 流程
-```
-1. 加锁
-2. 查找 frames_[frameId]
-3. 更新 planarHits_/interleavedHits_      ← [优化5] 统计
-4. 目标布局 == 原始布局 → 零拷贝返回
-5. findOrCreateView():
-   a. 缓存命中 → 直接返回
-   b. 缓存未命中:
-      i.  poolAlloc(dataSize)              ← [优化1] 内存池
-      ii. LayoutTransformer 转换           ← [优化3/4] 快速转换
-      iii.缓存到 frame.views
-6. refCount++, lastAccess=now()            ← [优化2] 引用计数
-7. 返回 ImageDescriptor
-```
-
-#### performMaintenance 流程 (两级GC)
-```
-1. 加锁
-2. evictZeroRefViews()                    ← [优化2] LRU淘汰
-   a. 收集 refCount==0 的视图
-   b. 按 lastAccess 排序 (最老优先)
-   c. 逐个释放回池, 直到 usage ≤ maxMemory_
-3. 若仍超限: FIFO淘汰最老帧
-   a. 从 frameOrder_ 队头取最老帧
-   b. freeFrameData → poolFree 回收
-```
-
-### 5.3 LayoutTransformer 转换路径选择
-
-```
-InterleavedToPlanar(src, dst):
-  ├── ch==1 → memcpy (逐行, 处理padding)
-  ├── U8_C3 → I2P_U8C3_Optimized()     ← AVX2/SSSE3 + 线程池 + NT存储 + flat批量
-  ├── U8_C4 → I2P_Generic<uint8_t>()   ← 多线程 + 分块
-  └── Float32 → I2P_Generic<float>()   ← 多线程 + 分块
-
-PlanarToInterleaved(src, dst):
-  ├── ch==1 → memcpy
-  ├── U8_C3 → P2I_U8C3_Optimized()     ← SSSE3 + 线程池
-  ├── U8_C4 → P2I_Generic<uint8_t>()   ← 多线程
-  └── Float32 → P2I_Generic<float>()   ← 多线程
-```
-
-### 5.4 线程安全
-
-| 资源 | 保护锁 | 说明 |
-|------|--------|------|
-| `frames_`, `frameOrder_`, `maxMemory_` | `framesMutex_` | 所有帧/视图操作 |
-| `lastError_` | `errorMutex_` | 独立锁 |
-| `nextFrameId_` | `std::atomic` | 无锁自增 |
-| `memoryUsage_` | `std::atomic` | [优化7] 无锁内存跟踪 |
-| `planarHits_`, `interleavedHits_` | `std::atomic` | 无锁统计 |
-| `AlignedMemoryPool::buckets_` | `poolMutex_` | 池操作独立锁 |
-
-**锁嵌套顺序** (严格单向, 无死锁):
-```
-framesMutex_ → poolMutex_    (帧操作内调用池分配/释放)
-framesMutex_ → errorMutex_   (GetView内调用setError)
-```
-绝不允许反向嵌套(poolMutex_→framesMutex_ 或 errorMutex_→framesMutex_)。
-
----
-
-## 6. Unify.hpp 便捷层
-
-### 6.1 设计原则
-
-- 每个函数都是 **无状态的自由函数**
-- 通过 `#ifdef HAS_OPENCV` / `HAS_HALCON` / `QT_CORE_LIB` 条件编译
-- 返回的对象 **引用服务内部内存**, 帧被RemoveFrame后失效
-
-### 6.2 函数列表
-
-| 函数 | 请求布局 | 返回类型 | 说明 |
-|------|---------|---------|------|
-| `Unify::ToCvMat(view)` | Interleaved | `cv::Mat` | **★推荐**: 从ScopedView一行转换 |
-| `Unify::ToCvMat(desc)` | Interleaved | `cv::Mat` | 从ImageDescriptor转换 |
-| `Unify::ToCvMat(svc, fid)` | Interleaved | `cv::Mat` | 兼容旧接口 |
-| `Unify::SubmitCvMat(svc, mat)` | — | `ScopedFrame` | cv::Mat → 提交到服务 |
-| `Unify::ToHImage(view)` | Planar | `HImage` | **★推荐**: 从ScopedView一行转换 |
-| `Unify::ToHImage(desc)` | Planar | `HImage` | 从ImageDescriptor转换 |
-| `Unify::ToHImage(svc, fid)` | Planar | `HImage` | 兼容旧接口 |
-| `Unify::ToQImage(svc, fid)` | Interleaved | `QImage` | 适合UI绘制 |
-
-### 6.3 一行代码适配器示例
+### 5.2 基础用法 — 手动管理
 
 ```cpp
-// ★ 推荐: ScopedView → HImage (一行代码)
-ScopedFrame frame(svc, data, w, h, PixelFormat::U8_C3);
-ScopedView planar(svc, frame.Id(), MemoryLayout::Planar);
-auto himg = Unify::ToHImage(planar);  // done!
+// 1. 提交帧（服务内部会拷贝数据，调用方可自由释放 buffer）
+uint64_t fid = svc->SubmitFrame(rawData, 1920, 1080, PixelFormat::U8_C3);
 
-// ★ 推荐: ScopedView → cv::Mat (一行代码)
-ScopedView interleaved(svc, frame.Id(), MemoryLayout::Interleaved);
-cv::Mat mat = Unify::ToCvMat(interleaved);  // done!
+// 2. 获取目标布局的视图
+ImageDescriptor planar = svc->GetView(fid, MemoryLayout::Planar);
+// planar.dataPtr 现在指向 Planar 格式的数据
 
-// 通道访问 + Halcon集成
-auto r = planar.R();  // uint8_t* 红色通道
-auto g = planar.G();  // uint8_t* 绿色通道
-auto b = planar.B();  // uint8_t* 蓝色通道
+// 3. 使用完毕释放视图（引用计数-1）
+svc->ReleaseView(fid, planar.dataPtr);
 
-// 注意生命周期: ScopedView析构后指针失效
-// 如需长期持有, 深拷贝:
-cv::Mat safeCopy = Unify::ToCvMat(interleaved).clone();
+// 4. 不再需要此帧时移除
+svc->RemoveFrame(fid);
+```
+
+### 5.3 推荐用法 — RAII 自动管理
+
+```cpp
+{
+    ScopedFrame frame(svc.get(), rawData, 1920, 1080, PixelFormat::U8_C3);
+    if (!frame.Ok()) { /* 错误处理 */ }
+
+    ScopedView planar(svc.get(), frame.Id(), MemoryLayout::Planar);
+    if (!planar.Ok()) { /* 错误处理 */ }
+
+    // 使用 planar.Data() / planar.Width() / planar.Height() ...
+    // Planar 布局专用通道访问:
+    uint8_t* r = planar.R();
+    uint8_t* g = planar.G();
+    uint8_t* b = planar.B();
+
+} // 离开作用域自动释放视图和帧
+```
+
+### 5.4 与第三方库集成
+
+```cpp
+#include "core/Unify.hpp"
+
+// OpenCV (需定义 HAS_OPENCV 并链接 OpenCV)
+ScopedView interleaved(svc.get(), fid, MemoryLayout::Interleaved);
+cv::Mat mat = Unify::ToCvMat(interleaved);  // 零拷贝包装
+
+// Halcon (需定义 HAS_HALCON 并链接 Halcon)
+ScopedView planar(svc.get(), fid, MemoryLayout::Planar);
+HalconCpp::HImage himg = Unify::ToHImage(planar);
+
+// Qt (自动检测 QT_CORE_LIB)
+QImage qimg = Unify::ToQImage(svc.get(), fid);
 ```
 
 ---
 
-## 7. 扩展指南
+## 6. 扩展指南
 
-### 7.1 添加新的像素格式
+### 6.1 添加新的像素格式
 
-1. `IImageUnifyService.h` → `PixelFormat` 枚举添加新值
-2. `ImageDescriptor` → 更新 `getChannels()`, `getBytesPerPixel()`
-3. `ImageFormatUtils` → 更新 `GetPixelFormatString()`
-4. `ImageUnifyService.cpp` → 确认 `ElementSize()` 覆盖新格式
-5. 若新格式需要特化快速路径, 在 `LayoutTransformer` 中添加
-6. `Unify.hpp` → 更新对应库的类型映射
-7. `image_unify_test.cpp` → 添加测试
+1. 在 `IImageUnifyService.h` 的 `PixelFormat` 枚举中添加新值
+2. 更新 `ImageDescriptor` 中的 `getChannels()`、`getBytesPerPixel()` 方法
+3. 更新 `ImageFormatUtils::GetPixelFormatString()`
+4. 在 `ImageUnifyService.cpp` 的 `LayoutTransformer` 中添加对应的转换逻辑
+5. 如果是常用格式，考虑添加 SIMD 特化路径
 
-### 7.2 添加新的第三方库适配
+### 6.2 添加新的第三方库适配
 
-在 `Unify.hpp` 中添加条件编译块:
-
+在 `Unify.hpp` 中添加新的条件编译段：
 ```cpp
-#ifdef HAS_TENSORRT
-#include <NvInfer.h>
-inline void* ToGpuBuffer(IImageUnifyService* svc, uint64_t fid) {
-    ImageDescriptor desc = svc->GetView(fid, MemoryLayout::Interleaved);
-    // cudaMemcpy to GPU...
+#ifdef HAS_MY_LIBRARY
+#include <MyLibrary.h>
+
+inline MyImage ToMyImage(IImageUnifyService* svc, uint64_t frameId) {
+    ImageDescriptor desc = svc->GetView(frameId, MemoryLayout::Interleaved);
+    if (!desc.dataPtr) return {};
+    // 构造 MyImage ...
 }
+
 #endif
 ```
 
-### 7.3 调优内存池
-
-修改 `ImageUnifyService.cpp` 中的常量:
+### 6.3 调整内存限制
 
 ```cpp
-static constexpr size_t BUCKET_SIZES[] = {
-    256*1024, 1024*1024, 4*1024*1024, 16*1024*1024, 64*1024*1024, 0
-};
-// 每桶最多保留N块:
-if (bucket.size() < 4) { bucket.push_back({ptr, size}); ... }
+auto svc = AxPlug::GetService<IImageUnifyService>();
+svc->SetMaxMemory(512 * 1024 * 1024);  // 设置为 512MB (默认 256MB)
+
+// 查询当前内存使用
+size_t used = svc->GetMemoryUsage();
+
+// 手动清除所有缓存
+svc->ClearCache();
 ```
 
-- **增大桶数**: 适合分辨率种类多的场景
-- **增大保留数**: 适合高频分配/释放的场景
-- **减小保留数**: 适合内存受限的嵌入式环境
+### 6.4 优化 SIMD 路径
 
-### 7.4 未来优化方向
-
-| 方向 | 说明 | 预期收益 |
-|------|------|---------|
-| AVX-512 | 512位SIMD, 64像素/迭代 | 额外~1.5x (服务器CPU) |
-| GPU转换 | CUDA/OpenCL做Interleaved↔Planar | 4K+大图显著加速 |
-| U8_C4 SIMD | 专用AVX2四通道去交错 | 当前走Generic路径 |
-| P2I AVX2 | Planar→Interleaved也用AVX2 | 当前仅SSSE3 |
+如果需要为新格式添加 SIMD 优化：
+1. 参考 `I2P_U8C3_SSSE3_Row` 的模式编写单行处理函数
+2. 使用 Intel Intrinsics Guide 查找合适的指令
+3. 添加 AVX2 版本（同一掩码用 `_mm256_broadcastsi128_si256` 广播到256位）
+4. 考虑添加 NT Store 版本（仅适用于大图且目标地址32字节对齐）
+5. 在 `LayoutTransformer::InterleavedToPlanar` / `PlanarToInterleaved` 中添加分发逻辑
 
 ---
 
-## 8. 常见问题排查
+## 7. 维护注意事项
 
-### Q1: GetView返回空的ImageDescriptor
+### 7.1 常见陷阱
 
-1. 检查 `svc->GetLastError()`
-2. 调用 `svc->HasFrame(frameId)` 确认帧存在
-3. 帧可能被自动淘汰 — 增大 `SetMaxMemory` 或用 `ScopedFrame` 保持生命周期
-4. 确认 `SubmitFrame` 返回值不为0
+| 陷阱 | 说明 | 解决方式 |
+|------|------|----------|
+| `GetView` 后忘记 `ReleaseView` | 引用计数永远 > 0，视图无法被 LRU 淘汰 | 使用 `ScopedView` RAII 自动管理 |
+| 视图指针在 `RemoveFrame` 后仍在使用 | 帧删除后数据被回收，指针悬空 | 先释放所有视图，再移除帧 |
+| `SubmitFrame` 后立即释放原始 buffer | 安全！服务内部会拷贝数据 | 无需担心 |
+| 高频小图不需要多线程 | 线程池同步开销可能大于转换耗时 | 像素 < 200,000 时自动降级为单线程 |
 
-### Q2: 内存持续增长
+### 7.2 性能调优参数
 
-- 内存池会保留已释放的块供复用, 这是预期行为
-- 真正的内存用量看 `GetMemoryUsage()`, 不是进程RSS
-- 用 `ClearCache()` 清空所有帧 + 调用析构清空池
+| 参数 | 位置 | 默认值 | 含义 |
+|------|------|--------|------|
+| `AlignedMemoryPool::ALIGN` | `ImageUnifyService.h` | 64 | 内存对齐字节数（CPU缓存行大小） |
+| `BUCKET_COUNT` | `ImageUnifyService.h` | 6 | 内存池桶数量 |
+| 每桶最大空闲块 | `ImageUnifyService.cpp` | 4 | 防止内存池膨胀 |
+| `TILE_ROWS` | `ImageUnifyService.cpp` | 64 | 分块处理行数（L1缓存友好） |
+| `MT_PIXEL_THRESHOLD` | `ImageUnifyService.cpp` | 200,000 | 多线程触发像素阈值 |
+| `maxMemory_` | `ImageUnifyService.h` | 256MB | 服务总内存限制 |
 
-### Q3: 多线程访问崩溃
+### 7.3 调试技巧
 
-- 所有接口方法都是线程安全的
-- `GetView` 返回的 `dataPtr` 指向服务内部内存 — 如线程A持有指针, 线程B不应 `RemoveFrame`
-- **建议**: 用 `ScopedFrame` + `ScopedView` 管理生命周期, 或 `clone()` 数据
+- **内存泄漏检测**：检查 `GetMemoryUsage()` 是否持续增长 → 可能是 `ReleaseView` 遗漏
+- **性能分析**：`GetView` 内置 Profiler 计时，启用后可在 chrome://tracing 查看转换耗时
+- **错误信息**：调用 `svc->GetLastError()` 获取最近一次操作的错误描述
+- **内存池状态**：`AlignedMemoryPool::GetPooledCount()` 查看池中空闲块数量
 
-### Q4: 预取不生效
+### 7.4 锁策略
 
-- 需要至少5次 `GetView` 调用后才开始预测
-- 某布局请求比例需超过70%才会触发预转换
-- 检查原始布局: 如果原始就是预测布局, 预取会跳过(零拷贝已是最优)
+| 锁 | 类型 | 保护的数据 | 注意事项 |
+|----|------|-----------|----------|
+| `framesMutex_` | `mutex` | `frames_` 哈希表 + `frameOrder_` 队列 | 帧级操作持有 |
+| `FrameItem::itemMutex` | `mutex` | 单帧内的视图列表 | 细粒度锁，减少跨帧竞争 |
+| `errorMutex_` | `mutex` | `lastError_` 字符串 | 与 `framesMutex_` 不嵌套 |
+| `poolMutex_` | `mutex` | 内存池桶数组 | 仅在分配/回收时短暂持有 |
 
----
-
-## 9. 构建说明
-
-### 9.1 依赖
-
-| 依赖 | 必需 | 说明 |
-|------|------|------|
-| C++17 | 是 | 结构化绑定, if constexpr等 |
-| AxPlug框架 | 是 | 插件加载机制 |
-| OpenCV | 否 | `Unify::ToCvMat` 需要, 通过 `HAS_OPENCV` 启用 |
-| Halcon | 否 | `Unify::ToHImage` 需要, 通过 `HAS_HALCON` 启用 |
-| Qt | 否 | `Unify::ToQImage` 需要, 通过 `QT_CORE_LIB` 启用 |
-
-### 9.2 构建命令
-
-```bash
-# 构建依赖 (首次, 编译OpenCV Debug+Release)
-scripts\build_deps.bat
-
-# 配置
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-
-# Debug 构建
-cmake --build build --target ImageUnifyServicePlugin --target ImageUnifyTest --config Debug
-copy deps\opencv\bin\*d.dll build\bin\Debug\
-build\bin\Debug\ImageUnifyTest.exe
-
-# Release 构建 (性能测试用)
-cmake --build build --target ImageUnifyServicePlugin --target ImageUnifyTest --config Release
-copy deps\opencv\bin\opencv_core480.dll build\bin\Release\
-copy deps\opencv\bin\opencv_imgproc480.dll build\bin\Release\
-copy deps\opencv\bin\opencv_imgcodecs480.dll build\bin\Release\
-build\bin\Release\ImageUnifyTest.exe
-```
-
-### 9.3 集成到新项目
-
-```cmake
-target_link_libraries(YourApp PRIVATE AxCore)
-# 如需OpenCV
-target_compile_definitions(YourApp PRIVATE HAS_OPENCV)
-target_link_libraries(YourApp PRIVATE ${OpenCV_LIBS})
-```
-
----
-
-
-
-## 10. 设计优势总结
-
-1. **极简API** — 6个方法 + 2个RAII类 + R()/G()/B()语义访问器
-2. **RAII零泄漏** — `ScopedFrame` + `ScopedView` 自动管理生命周期
-3. **零拷贝快速路径** — 布局一致时直接返回指针, ~0.0003ms
-4. **极速转换** — AVX2+线程池+NT存储+融合路径, Release下完整流程超越Halcon **93%**
-5. **智能内存** — 对齐池分配+复用, 连续采集耗时降低1.9x
-6. **两级GC** — LRU视图淘汰 → FIFO帧淘汰, 精细化内存管理
-7. **预测预取** — 统计布局偏好, 自动预转换, 后续GetView零延迟
-8. **O(1)内存查询** — 原子计数器替代O(N×M)遍历, GC热路径零开销
-9. **格式完备** — U8/Float32 × C1/C3/C4 × Interleaved/Planar 全组合
-10. **线程安全** — 三把锁+四个原子变量, 严格单向嵌套, 无死锁
-11. **条件编译** — 核心无第三方依赖, OpenCV/Halcon/Qt按需启用
-12. **融合路径** — 预测命中时SubmitFrame单次遍历直接存储Planar, GetView零拷贝返回
-13. **Debug+Release** — CMake支持双配置, OpenCV/Halcon均可在两种模式下运行
+**无死锁保证**：所有锁都不嵌套。`framesMutex_` 和 `itemMutex` 之间通过"先释放帧锁，再加项锁"的模式避免嵌套。

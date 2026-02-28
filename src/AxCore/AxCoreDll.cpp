@@ -17,6 +17,14 @@
 
 // AxCore - C export functions
 
+// Global shutdown flag — outlives AxPluginManager's Meyer's singleton
+// so shared_ptr deleters can safely check it during static destruction (SIOF guard)
+static std::atomic<bool> g_shuttingDown{false};
+
+void Ax_Internal_SetShuttingDown() {
+    g_shuttingDown.store(true, std::memory_order_release);
+}
+
 // Internal thread_local error storage — single canonical location for all DLLs
 namespace {
     struct ThreadLocalError {
@@ -143,6 +151,10 @@ extern "C" {
         err.code = 0;
         err.message.clear();
         err.source.clear();
+    }
+
+    AX_CORE_API bool Ax_IsShuttingDown() {
+        return g_shuttingDown.load(std::memory_order_acquire);
     }
 
 } // extern "C"

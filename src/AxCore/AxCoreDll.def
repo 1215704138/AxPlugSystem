@@ -27,4 +27,5 @@ EXPORTS
     Ax_GetErrorSource
     Ax_HasErrorState
     Ax_ClearLastError
+    Ax_IsShuttingDown
 

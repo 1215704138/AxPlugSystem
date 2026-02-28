@@ -52,6 +52,9 @@ AX_CORE_API bool Ax_IsPluginLoaded(int index);
 // Introspection API
 AX_CORE_API int Ax_FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount);
 
+// Shutdown query API (SIOF guard for shared_ptr deleters)
+AX_CORE_API bool Ax_IsShuttingDown();
+
 // Profiler API
 AX_CORE_API void Ax_ProfilerBeginSession(const char *name, const char *filepath);
 AX_CORE_API void Ax_ProfilerEndSession();
@@ -229,7 +232,7 @@ template <typename T> inline std::shared_ptr<T> GetService(const char *name = ""
   if (!obj) return nullptr;
   uint64_t typeId = T::ax_type_id;
   std::string nameStr = name ? name : "";
-  return std::shared_ptr<T>(static_cast<T *>(obj), [typeId, nameStr](T *) { Ax_ReleaseSingletonRef(typeId, nameStr.c_str()); });
+  return std::shared_ptr<T>(static_cast<T *>(obj), [typeId, nameStr](T *) { if (!Ax_IsShuttingDown()) Ax_ReleaseSingletonRef(typeId, nameStr.c_str()); });
 }
 
 // Legacy raw-pointer getter for backward compatibility (no UAF protection)
@@ -264,7 +267,7 @@ template <typename T>
   if (!obj) return { nullptr, AxInstanceError::kErrorNotFound };
   uint64_t typeId = T::ax_type_id;
   std::string nameStr = name ? name : "";
-  auto ptr = std::shared_ptr<T>(static_cast<T*>(obj), [typeId, nameStr](T*) { Ax_ReleaseSingletonRef(typeId, nameStr.c_str()); });
+  auto ptr = std::shared_ptr<T>(static_cast<T*>(obj), [typeId, nameStr](T*) { if (!Ax_IsShuttingDown()) Ax_ReleaseSingletonRef(typeId, nameStr.c_str()); });
   return { ptr, AxInstanceError::kSuccess };
 }
 

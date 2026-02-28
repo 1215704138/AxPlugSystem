@@ -91,6 +91,8 @@ public:
     ImageUnifyService();
     ~ImageUnifyService() override;
 
+    void OnShutdown() override;
+
 protected:
     void Destroy() override { delete this; }
 

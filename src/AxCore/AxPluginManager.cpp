@@ -587,6 +587,8 @@ int AxPluginManager::FindPluginsByTypeId(uint64_t typeId, int* outIndices, int m
 
 void AxPluginManager::ReleaseAllSingletons() {
   isShuttingDown_.store(true, std::memory_order_release);
+  extern void Ax_Internal_SetShuttingDown();
+  Ax_Internal_SetShuttingDown();
 
   std::vector<std::shared_ptr<IAxObject>> stackCopy;
   {

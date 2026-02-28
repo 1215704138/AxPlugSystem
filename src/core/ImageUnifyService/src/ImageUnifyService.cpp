@@ -180,6 +180,15 @@ public:
         doneCv_.wait(lock, [this] { return pending_.load(std::memory_order_acquire) == 0; });
     }
 
+    void Shutdown() {
+        { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
+        startCv_.notify_all();
+        for (auto& w : workers_) {
+            if (w.joinable()) w.join();
+        }
+        workers_.clear();
+    }
+
 private:
     explicit StaticThreadPool(int n)
         : items_(std::max(n, 0)), workerGen_(std::max(n, 0), 0)
@@ -209,7 +218,9 @@ private:
     ~StaticThreadPool() {
         { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
         startCv_.notify_all();
-        for (auto& w : workers_) w.join();
+        for (auto& w : workers_) {
+            if (w.joinable()) w.detach();
+        }
     }
 
     StaticThreadPool(const StaticThreadPool&) = delete;
@@ -730,6 +741,10 @@ bool LayoutTransformer::PlanarToInterleaved(const ImageDescriptor& src, void* ds
 ImageUnifyService::ImageUnifyService() {
     std::cout << "[ImageUnifyService] 初始化完成 (maxMemory="
               << maxMemory_ / (1024 * 1024) << "MB, 内存池=ON, 预取=ON)" << std::endl;
+}
+
+void ImageUnifyService::OnShutdown() {
+    StaticThreadPool::Instance().Shutdown();
 }
 
 ImageUnifyService::~ImageUnifyService() {

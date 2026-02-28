@@ -41,14 +41,15 @@ LoggerService::LoggerService()
 }
 
 LoggerService::~LoggerService() {
-  // 停止异步日志线程
-  if (asyncEnabled_ && logThread_.joinable()) {
+  // OnShutdown() 已经 join 过了。析构期只做 detach 兜底，
+  // 防止 DllMain 或静态析构期 join 导致死锁。
+  if (logThread_.joinable()) {
     {
       std::lock_guard<std::mutex> lock(queueMutex_);
       stopFlag_ = true;
     }
     queueCondition_.notify_all();
-    logThread_.join();
+    logThread_.detach();
   }
 
   if (logFile_.is_open()) {

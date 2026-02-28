@@ -12,11 +12,14 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <shlwapi.h>
@@ -261,7 +264,10 @@ public:
    * @return 是否成功
    */
   static bool AtomicWriteFile(const std::string& targetPath, const std::string& content) {
-    std::string tmpPath = targetPath + ".tmp";
+    static std::atomic<uint64_t> seq{0};
+    std::ostringstream oss;
+    oss << targetPath << "." << std::this_thread::get_id() << "_" << seq.fetch_add(1, std::memory_order_relaxed) << ".tmp";
+    std::string tmpPath = oss.str();
     
     // 1. 写入临时文件
     {

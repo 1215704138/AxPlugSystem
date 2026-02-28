@@ -1,4 +1,5 @@
 #include "AxPluginManager.h"
+#include "DefaultEventBus.h"
 #include "AxPlug/AxProfiler.h"
 #include "AxPlug/AxPluginExport.h"
 #include "AxPlug/OSUtils.hpp"
@@ -16,9 +17,16 @@ namespace fs = std::filesystem;
 //           exception handling, profiler integration
 // ============================================================
 
-AxPluginManager::AxPluginManager() {}
+AxPluginManager::AxPluginManager()
+{
+    defaultEventBus_ = std::make_unique<DefaultEventBus>();
+}
 
 AxPluginManager::~AxPluginManager() {
+  // Shutdown event bus before releasing singletons
+  if (auto* bus = dynamic_cast<DefaultEventBus*>(defaultEventBus_.get()))
+      bus->Shutdown();
+
   ReleaseAllSingletons();
   
   // Fix 1.4: DLLs are intentionally NOT unloaded here.
@@ -44,6 +52,14 @@ void AxPluginManager::Init(const char *mainAppDir) {
     std::string currentPath = AxPlug::OSUtils::GetCurrentModulePath();
     std::string currentDir = AxPlug::OSUtils::GetDirectoryPath(currentPath);
     AxPlug::OSUtils::SetLibrarySearchPath(currentDir);
+  }
+
+  // Phase 3: Publish system init event
+  auto* bus = GetEventBus();
+  if (bus) {
+    auto ev = std::make_shared<AxPlug::SystemInitEvent>();
+    ev->pluginDir = mainAppDir ? mainAppDir : "";
+    bus->Publish(AxPlug::EVENT_SYSTEM_INIT, std::move(ev), AxPlug::DispatchMode::DirectCall);
   }
 }
 
@@ -193,6 +209,28 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
     registerPlugin(mod.plugins[i], moduleIndex, i);
   }
   modules_.push_back(std::move(mod));
+
+  // Publish PluginLoaded events for each plugin in this module (under lock)
+  // Use a deferred approach: collect events, publish after lock release
+  struct PendingEvent { std::string name; };
+  std::vector<PendingEvent> pendingEvents;
+  const auto& loadedMod = modules_.back();
+  if (loadedMod.isLoaded) {
+    for (const auto& p : loadedMod.plugins) {
+      if (p.interfaceName) pendingEvents.push_back({ p.interfaceName });
+    }
+  }
+  wlock.unlock();
+
+  // Publish lifecycle events outside lock
+  auto* bus = GetEventBus();
+  if (bus) {
+    for (const auto& pe : pendingEvents) {
+      auto ev = std::make_shared<AxPlug::PluginLoadedEvent>();
+      ev->pluginName = pe.name;
+      bus->Publish(AxPlug::EVENT_PLUGIN_LOADED, std::move(ev), AxPlug::DispatchMode::DirectCall);
+    }
+  }
 }
 
 // Internal: create object by typeId (caller must hold at least shared_lock)
@@ -585,7 +623,25 @@ int AxPluginManager::FindPluginsByTypeId(uint64_t typeId, int* outIndices, int m
   return found;
 }
 
+AxPlug::IEventBus* AxPluginManager::GetEventBus()
+{
+    if (externalEventBus_) return externalEventBus_;
+    return defaultEventBus_.get();
+}
+
+void AxPluginManager::SetEventBus(AxPlug::IEventBus* externalBus)
+{
+    externalEventBus_ = externalBus;
+}
+
 void AxPluginManager::ReleaseAllSingletons() {
+  // Publish shutdown event before tearing down
+  auto* bus = GetEventBus();
+  if (bus) {
+    auto ev = std::make_shared<AxPlug::SystemShutdownEvent>();
+    bus->Publish(AxPlug::EVENT_SYSTEM_SHUTDOWN, std::move(ev), AxPlug::DispatchMode::DirectCall);
+  }
+
   isShuttingDown_.store(true, std::memory_order_release);
   extern void Ax_Internal_SetShuttingDown();
   Ax_Internal_SetShuttingDown();

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "AxException.h"
+#include "AxEventBus.h"
+#include "core/INetworkEventBus.h"
 #include "AxPluginExport.h"
 #include "AxProfiler.h"
 #include "IAxObject.h"
@@ -322,6 +324,27 @@ inline void ClearLastError() { Ax_ClearLastError(); }
 
 // Check if the last operation produced an error
 inline bool HasError() { return Ax_HasErrorState(); }
+
+// ========== Event Bus API ==========
+
+// Get the current event bus instance (default or externally overridden)
+inline IEventBus *GetEventBus() { return Ax_GetEventBus(); }
+
+// Replace the default event bus with an external implementation (e.g. NetworkEventBusPlugin)
+inline void SetEventBus(IEventBus *bus) { Ax_SetEventBus(bus); }
+
+// Publish an event with compile-time hash ID
+inline void Publish(uint64_t eventId, std::shared_ptr<AxEvent> payload, DispatchMode mode = DispatchMode::DirectCall) {
+  auto *bus = Ax_GetEventBus();
+  if (bus) bus->Publish(eventId, std::move(payload), mode);
+}
+
+// Subscribe to an event with compile-time hash ID
+inline EventConnectionPtr Subscribe(uint64_t eventId, EventCallback callback, void *specificSender = nullptr) {
+  auto *bus = Ax_GetEventBus();
+  if (bus) return bus->Subscribe(eventId, std::move(callback), specificSender);
+  return nullptr;
+}
 
 } // namespace AxPlug
 

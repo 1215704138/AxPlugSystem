@@ -157,6 +157,16 @@ extern "C" {
         return g_shuttingDown.load(std::memory_order_acquire);
     }
 
+    // ========== Event Bus API ==========
+
+    AX_CORE_API AxPlug::IEventBus* Ax_GetEventBus() {
+        return AxPluginManager::Instance()->GetEventBus();
+    }
+
+    AX_CORE_API void Ax_SetEventBus(AxPlug::IEventBus* bus) {
+        AxPluginManager::Instance()->SetEventBus(bus);
+    }
+
 } // extern "C"
 
 // DLL entry point

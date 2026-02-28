@@ -12,17 +12,19 @@
 8. [开发插件](#8-开发插件)
 9. [核心服务 — 日志](#9-核心服务--日志)
 10. [核心服务 — 图像统一](#10-核心服务--图像统一)
-11. [驱动插件 — TCP / UDP](#11-驱动插件--tcp--udp)
-12. [构建与部署](#12-构建与部署)
-13. [高级特性](#13-高级特性)
-14. [使用注意事项](#14-使用注意事项)
-15. [常见问题](#15-常见问题)
+11. [核心服务 — 事件总线 (Event Bus)](#11-核心服务--事件总线-event-bus)
+12. [驱动插件 — TCP / UDP](#12-驱动插件--tcp--udp)
+13. [构建与部署](#13-构建与部署)
+14. [高级特性](#14-高级特性)
+15. [API 参考手册 (AxPlug 命名空间)](#15-api-参考手册-axplug-命名空间)
+16. [使用注意事项](#16-使用注意事项)
+17. [常见问题](#17-常见问题)
 
 ---
 
 ## 1. 框架简介
 
-AxPlug 是一个工业级 C++17 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。
+AxPlug 是一个工业级 C++17 插件框架，支持动态加载 DLL 插件并通过类型安全的模板 API 进行调用。 此 v1.0 版本作为首个稳定投产的基石版本发布。
 
 **核心特性：**
 
@@ -55,20 +57,30 @@ AxPlug 是一个工业级 C++17 插件框架，支持动态加载 DLL 插件并�
 | **Tool** (原始指针) | 用户管理 | 多实例 | `CreateToolRaw<T>()` → `T*` | `DestroyTool(ptr)` |
 | **Service** | 框架托管 | 命名单例 | `GetService<T>(name)` | `ReleaseService<T>(name)` |
 
-### 2.2 接口基类
+### 2.2 接口暴露与类型系统
 
-所有插件接口必须继承 `IAxObject` 并使用 `AX_INTERFACE` 宏声明类型键：
+所有对外暴露或插件间调用的接口必须继承自框架基类 `IAxObject`，这是框架识别多态和生命管理的前提。
+
+**声明规范：** 必须使用 `AX_INTERFACE(InterfaceName)` 宏声明类型键，这使得框架在编译期为其生成一个唯一的 64 bit FNV-1a Hash 值（即类型戳），省去运行时的 RTTI 字符串比较。
 
 ```cpp
 #include "AxPlug/IAxObject.h"
 
+// IMath.h (作为公共接口对外暴露)
 class IMath : public IAxObject {
+    // 强制声明，使得 AxPlug<IMath> 知道这是哪个类型
     AX_INTERFACE(IMath)
 public:
     virtual int Add(int a, int b) = 0;
     virtual int Sub(int a, int b) = 0;
 };
 ```
+
+**参数传递规范：**
+由于插件系统横跨多个 DLL 模块，STL 容器直接穿越边界往往会导致 ABI 不兼容灾难。在涉及插件间或宿主发起的跨 DLL 接口调用时，**极度推荐：**
+1. 传入纯 C 基本类型（`int`, `bool`, `double`, `const char*`等）。
+2. 如果必须传递复杂长字符串或二进制序列，建议封装跨模块安全的字符串副本。
+3. 返回实例对象务必返回由框架监管的智能指针（如 `AxPtr`）。
 
 ### 2.3 架构
 
@@ -355,7 +367,17 @@ AxPlug::ReleaseService<IImageUnifyService>();
 
 ---
 
-## 11. 驱动插件 — TCP / UDP
+## 11. 核心服务 — 事件总线 (Event Bus)
+
+v1.0 引入了极其轻量的框架级事件总线 `IEventBus` 以及可选支持跨节点 UDP 组播互联的 `INetworkEventBus` 插件。
+
+详细使用参见：
+- [EventBus.md](EventBus.md) (事件总线常规使用手册)
+- [EventBus_Dev.md](EventBus_Dev.md) (事件总线高级定制开发)
+
+---
+
+## 12. 驱动插件 — TCP / UDP
 
 所有网络驱动接口支持命名绑定，默认为 winsock 实现，可通过 `"boost"` 获取 Boost.Asio 实现。
 
@@ -379,9 +401,9 @@ udp->SendStringTo("127.0.0.1", 9001, "Hello UDP");
 
 ---
 
-## 12. 构建与部署
+## 13. 构建与部署
 
-### 12.1 项目结构
+### 13.1 项目结构
 
 ```
 AxPlugSystem/
@@ -402,7 +424,7 @@ AxPlugSystem/
 └── CMakeLists.txt        根构建文件
 ```
 
-### 12.2 部署要求
+### 13.2 部署要求
 
 - `AxCore.dll` 必须在 exe 同目录
 - 所有插件 DLL 默认放在 exe 同目录（可通过 `AxPlug::Init(dir)` 指定其他目录）
@@ -410,9 +432,9 @@ AxPlugSystem/
 
 ---
 
-## 13. 高级特性
+## 14. 高级特性
 
-### 13.1 智能指针 (AxPtr)
+### 14.1 智能指针 (AxPtr)
 
 ```cpp
 {
@@ -422,7 +444,7 @@ AxPlugSystem/
 } // 自动调用 Destroy()
 ```
 
-### 13.2 内置 Profiler
+### 14.2 内置 Profiler
 
 ```cpp
 AxPlug::ProfilerBegin("MyApp", "trace.json");
@@ -436,7 +458,7 @@ AxPlug::ProfilerEnd();
 // 在 chrome://tracing 中打开 trace.json 可视化
 ```
 
-### 13.3 异常处理与错误码
+### 14.3 异常处理与错误码
 
 ```cpp
 // 检查错误
@@ -451,11 +473,11 @@ auto [service, error] = AxPlug::TryGetService<ILoggerService>("main");
 if (error != AxInstanceError::kSuccess) { /* 处理错误 */ }
 ```
 
-### 13.4 多线程并发
+### 14.4 多线程并发
 
 框架所有 API 线程安全（`shared_mutex` 读写锁），读操作并发无锁竞争。
 
-### 13.5 编译期安全检查
+### 14.5 编译期安全检查
 
 ```cpp
 auto* obj = AxPlug::CreateTool<int>();          // 编译错误：T 必须继承自 IAxObject
@@ -463,7 +485,7 @@ struct Bad : IAxObject {};
 auto* b = AxPlug::CreateTool<Bad>();            // 编译错误：缺少 ax_type_id 定义
 ```
 
-### 13.6 跨平台工具
+### 14.6 跨平台工具
 
 ```cpp
 #include "AxPlug/OSUtils.hpp"
@@ -472,7 +494,107 @@ bool ok = AxPlug::OSUtils::AtomicWriteFile("config.json", content);
 
 ---
 
-## 14. 使用注意事项
+## 15. API 参考手册 (AxPlug 命名空间)
+
+以下是 `AxPlug` 命名空间中暴露的所有核心 API 详细说明。这些 API 全部是线程安全的，确保了在多线程环境下的调用可靠性。
+
+### 15.1 初始化阶段 (Initialization)
+
+#### `void Init(const char *pluginDir = "")`
+- **功能**: 初始化插件系统并从指定目录加载所有插件。
+- **参数**:
+  - `pluginDir` (可选): 插件扫描目录。如果为空（默认），则自动侦测并加载 exe 所在目录中的插件 DLL。
+- **说明**: 宿主程序运行早期必须首先调用此函数，或者使用更便捷的全局初始化宏 `AX_HOST_INIT()`。
+
+### 15.2 Tool 插件生命周期管理 (Tool API)
+
+#### `template <typename T> std::shared_ptr<T> CreateTool()`
+- **功能**: 创建一个具有框架默认实现的 Tool 插件实例。
+- **返回**: 托管该实例生命周期的标准智能指针。离开作用域自动销毁。失败时返回 `nullptr`。
+
+#### `template <typename T> std::shared_ptr<T> CreateTool(const char *implName)`
+- **功能**: 根据命名绑定机制，创建一个指定名称实现的 Tool 插件实例。
+- **参数**:
+  - `implName`: 具体的实现类绑定的名称（如网络驱动中的 `"boost"`）。
+
+#### `template <typename T> void DestroyTool(std::shared_ptr<T> &tool)`
+- **功能**: 显式重置并通知框架销毁管理 Tool 的智能指针，主要用于打破循环引用或提前释放内存。
+
+#### `template <typename T> T *CreateToolRaw()`
+- **功能**: 仅获取具备默认实现的 Tool 插件的裸指针实例（非托管方式）。
+- **说明**: 要求使用者必须负责在其用尽后显式配对调用 `DestroyTool(ptr)` 释放内存以防止内存泄漏。
+
+#### `template <typename T> T *CreateToolRaw(const char *implName)`
+- **功能**: 通过命名绑定方式，获取创建的 Tool 插件的裸指针实例。
+
+#### `void DestroyTool(IAxObject *tool)`
+- **功能**: 用于主动销毁由任意 `CreateToolRaw` 系函数分配返回的纯虚基类裸指针插件实例。
+
+### 15.3 Service 单例服务管理 (Service API)
+
+#### `template <typename T> std::shared_ptr<T> GetService(const char *name = "")`
+- **功能**: 懒加载式获取系统中运行的一个 Service 单例。同一名称、同类接口将始终返回统一的实例引用。
+- **参数**: 
+  - `name` (可选): 单例绑定的命名区分符。缺省传空字符串 `""` 则表示请求获取同类型最基础的全局单例。
+- **返回**: 框架内含 UAF（释放后使用）和 SIOF（静态初始顺序死锁）等自动守卫的高安全机制包装型智能指针。
+
+#### `template <typename T> void ReleaseService(const char *name = "")`
+- **功能**: 主动干预单例释放（内部使其全局强引用计数减 1。仅当该类型单量没有任何外部调用栈引用时，则其实例才将彻底析构卸载）。
+
+#### `template <typename T> std::pair<std::shared_ptr<T>, AxInstanceError> TryGetService(const char *name = "") noexcept`
+- **功能**: [无异常降级版] 尝试安全平缓获取服务，获取失败时函数决不抛弃任何 C++ 异常，而是直接返回故障错误码机制。
+- **返回**: 返回涵盖服务实例与 `AxInstanceError` 标准状态对结构。最佳使用场景存在于深层析构函数或其他被 `noexcept` 隔离保护的应用清理安全路径里。
+
+#### `template <typename T> T *GetServiceRaw(const char *name = "")`
+- **功能**: [降权兼容模式] 退化以获取单例的直接裸结构指针。
+- **注意**: 由于此模式完全丧失对 UAF 内存安全的感知机制保障，仅保留供老版本兼容集成期使用，并不主张于新建重点业务组件代码采用。
+
+### 15.4 运行时状态与自省 (Query & Introspection API)
+
+#### `int GetPluginCount()`
+- **功能**: 获取当前框架实例在本地扫描记载并启动注册妥当的所有插件模块及实现的绝对数量总和。
+
+#### `AxPluginQueryInfo GetPluginInfo(int index)`
+- **功能**: 按递增顺序获取任意确切单个插件模块详情。返回包涵 `fileName` (文件名), `interfaceName` (接口), `isTool` (是否独立实例), `isLoaded` (启动情况) 之信息统集结构体。
+
+#### `template<typename T> std::vector<AxPluginQueryInfo> FindImplementations()`
+- **功能**: 针对特定请求类型的运行时自省。一键反向定位查询出实现类与系统挂接绑定成功的各类实现版本分布。
+- **返回**: 可用实现包体记录集合。特别适宜应用界面选项卡动态呈列该算力下能提供的一切可选驱动实现方案。
+
+### 15.5 底层性能调优与检修诊断 (Profiler & Error API)
+
+#### `void ProfilerBegin(const char *name = "AxPlug", const char *filepath = "trace.json")`
+- **功能**: 控制初始化激活底层侵入式性能测量追踪系统，把探针数据流向默认 Chrome Trace (.json) 指定格式记录文件。
+
+#### `void ProfilerEnd()`
+- **功能**: 停止测量监听器并把积压在运行库日志缓存全盘原子刷写至磁盘目标中完结此会话侦探。
+
+#### `const char *GetLastError()`
+- **功能**: 以 TLS（线程局部存储）的形式索求该线程池工作环境下遭受的框架级别最后已知错误现场根源异常说明摘要。
+
+#### `void ClearLastError()`
+- **功能**: 精准洗除本单独调用栈引发出的错误残留报警标志。
+
+#### `bool HasError()`
+- **功能**: 用于超快速鉴定最近操作序列调用到底触发底层挂钩崩溃状态保护没有。
+
+### 15.6 全局事件协调总线 (Event Bus API)
+
+#### `IEventBus *GetEventBus()`
+- **功能**: 取出当前主导执行跨对象发布与响应运转的顶层总线核心实例句柄引用。
+
+#### `void SetEventBus(IEventBus *bus)`
+- **功能**: (内核覆盖高级操作): 指令让底层放弃内部自旋默认事件分发总线，转接路由流量交给指定外挂网络分布或集群网格驱动模块。
+
+#### `void Publish(uint64_t eventId, std::shared_ptr<AxEvent> payload, DispatchMode mode = DispatchMode::DirectCall)`
+- **功能**: 给总线的干路频道投入一段附着特定消息类型 `eventId` 并携带内容负荷 `payload` 之通讯信号。配合不同步态 `mode` 发挥同步阻滞（DirectCall）、队尾排班（Queued）乃至投递完待机监听等丰富行为序列。
+
+#### `EventConnectionPtr Subscribe(uint64_t eventId, EventCallback callback, void *specificSender = nullptr)`
+- **功能**: 要求订阅并响应关注的类目标 ID (`eventId`) 动作事件。一旦成功，会回馈一个遵循 RAII 惯例的保活指针令牌 (`EventConnectionPtr`)——令牌对象在生存周期内代表你始终保持在线侦听活跃状态；出界或析构其就意味向总线完成注销安全释放操作。此外可透过可选的 `specificSender` 实质收缩仅监看只源于单独确定对等体发信才有所触警行动的精确过滤网络机制。
+
+---
+
+## 16. 使用注意事项
 
 - **禁止**直接 `delete` 插件对象，必须通过 `DestroyTool` 或智能指针释放
 - `AX_PROFILE_SCOPE(name)` 的 `name` 必须是**静态字符串**
@@ -481,7 +603,7 @@ bool ok = AxPlug::OSUtils::AtomicWriteFile("config.json", content);
 
 ---
 
-## 15. 常见问题
+## 17. 常见问题
 
 | 现象 | 解决方案 |
 |------|----------|

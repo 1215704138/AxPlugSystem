@@ -3,6 +3,7 @@
 #include "AxPlug/IAxObject.h"
 #include "AxPlug/AxPluginExport.h"
 #include "AxPlug/AxException.h"
+#include "AxPlug/AxEventBus.h"
 #include "AxPlug/OSUtils.hpp"
 #include <string>
 #include <unordered_map>
@@ -93,6 +94,10 @@ public:
     // Introspection API
     int FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount);
 
+    // Event Bus API
+    AxPlug::IEventBus* GetEventBus();
+    void SetEventBus(AxPlug::IEventBus* externalBus);
+
     // Error query (now routed through C API directly, see AxCoreDll.cpp)
 
 private:
@@ -139,6 +144,10 @@ private:
 
     // Shutdown guard: prevents new singleton creation during teardown
     std::atomic<bool> isShuttingDown_{false};
+
+    // Event bus: owned default + optional external override
+    std::unique_ptr<AxPlug::IEventBus> defaultEventBus_;
+    AxPlug::IEventBus* externalEventBus_ = nullptr;
 
     // Release all singletons in reverse creation order
     void ReleaseAllSingletons();

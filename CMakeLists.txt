@@ -148,6 +148,7 @@ add_subdirectory(src/driver/UdpSocket)
 
 add_subdirectory(src/core/ImageUnifyService)
 
+add_subdirectory(src/core/NetworkEventBus)
 
 
 

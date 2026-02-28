@@ -5,6 +5,7 @@ add_library(AxCore SHARED
     AxPluginManager.cpp
     AxProfiler.cpp
     AxCoreDll.cpp
+    DefaultEventBus.cpp
 )
 
 # 动态库配置

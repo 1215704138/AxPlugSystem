@@ -28,4 +28,5 @@ EXPORTS
     Ax_HasErrorState
     Ax_ClearLastError
     Ax_IsShuttingDown
-
+    Ax_GetEventBus
+    Ax_SetEventBus

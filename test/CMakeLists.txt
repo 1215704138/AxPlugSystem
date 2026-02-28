@@ -51,7 +51,14 @@ set_target_properties(network_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-# --- 2.5 命名绑定测试 (接口→多实现) ---
+# --- 2.5 事件总线测试 (EventBus + NetworkEventBus) ---
+add_executable(event_bus_test src/event_bus_test.cpp)
+target_link_libraries(event_bus_test PRIVATE ${AX_CORE_LIB})
+set_target_properties(event_bus_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# --- 2.6 命名绑定测试 (接口→多实现) ---
 add_executable(named_binding_test src/named_binding_test.cpp)
 target_link_libraries(named_binding_test PRIVATE ${AX_CORE_LIB})
 set_target_properties(named_binding_test PROPERTIES

@@ -1,4 +1,6 @@
 #include "AxPluginManager.h"
+#include <atomic>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>

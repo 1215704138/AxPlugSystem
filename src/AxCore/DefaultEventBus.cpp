@@ -8,6 +8,36 @@ DefaultEventBus::DefaultEventBus()
     eventLoopThread_ = std::thread(&DefaultEventBus::EventLoopThread, this);
 }
 
+void DefaultEventBus::SetExceptionHandler(AxPlug::ExceptionHandler handler)
+{
+    std::lock_guard<std::mutex> lock(exceptionHandlerMutex_);
+    if (handler) {
+        exceptionHandler_ = std::make_shared<AxPlug::ExceptionHandler>(std::move(handler));
+    } else {
+        exceptionHandler_.reset();
+    }
+}
+
+void DefaultEventBus::ReportException(const std::exception& e)
+{
+    std::shared_ptr<AxPlug::ExceptionHandler> handlerCopy;
+    {
+        std::lock_guard<std::mutex> lock(exceptionHandlerMutex_);
+        handlerCopy = exceptionHandler_;
+    }
+    if (handlerCopy) {
+        try { (*handlerCopy)(e); } catch (...) { fprintf(stderr, "[EventBus CRITICAL] Exception handler itself threw.\n"); }
+    } else {
+        fprintf(stderr, "[EventBus] Unhandled callback exception: %s\n", e.what());
+    }
+}
+
+void DefaultEventBus::ReportUnknownException()
+{
+    static std::runtime_error unknownErr("[EventBus] Unknown non-std::exception caught in callback.");
+    ReportException(unknownErr);
+}
+
 DefaultEventBus::~DefaultEventBus()
 {
     Shutdown();
@@ -112,8 +142,15 @@ void DefaultEventBus::DispatchDirect(uint64_t eventId, std::shared_ptr<AxPlug::A
             continue;
 
         // Phase 3: Per-callback timing with WARNING on timeout
+        // Exception isolation: catch callback throws to prevent crashing the bus
         auto cbStart = std::chrono::steady_clock::now();
-        sub.callback(payload);
+        try {
+            sub.callback(payload);
+        } catch (const std::exception& e) {
+            ReportException(e);
+        } catch (...) {
+            ReportUnknownException();
+        }
         auto cbEnd = std::chrono::steady_clock::now();
         auto cbDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(cbEnd - cbStart).count();
         if (cbDurationUs > CALLBACK_WARN_THRESHOLD_US)
@@ -197,16 +234,28 @@ void DefaultEventBus::EventLoopThread()
             fprintf(stderr, "[EventBus WARNING] Queued event 0x%llx waited %lld us in queue\n", static_cast<unsigned long long>(evt.eventId), static_cast<long long>(latencyUs));
         }
 
-        // Dispatch on the event loop thread
-        DispatchDirect(evt.eventId, std::move(evt.payload));
+        // Dispatch on the event loop thread (with exception isolation)
+        try {
+            DispatchDirect(evt.eventId, std::move(evt.payload));
+        } catch (const std::exception& e) {
+            ReportException(e);
+        } catch (...) {
+            ReportUnknownException();
+        }
     }
 
-    // Drain remaining events before exit
+    // Drain remaining events before exit (with exception isolation)
     std::lock_guard<std::mutex> lock(queueMutex_);
     while (!asyncQueue_.empty())
     {
         auto evt = std::move(asyncQueue_.front());
         asyncQueue_.pop();
-        DispatchDirect(evt.eventId, std::move(evt.payload));
+        try {
+            DispatchDirect(evt.eventId, std::move(evt.payload));
+        } catch (const std::exception& e) {
+            ReportException(e);
+        } catch (...) {
+            ReportUnknownException();
+        }
     }
 }

@@ -1,8 +1,8 @@
-# AxPlug 事件总线 (Event Bus) · 使用手册 v1.0
+# AxPlug 事件总线 (Event Bus) · 使用手册
 
 ## 1. 简介
 
-AxPlug v1.0 引入了完全整合的进程内与跨节点级别的事件总线 (Event Bus)。它基于发布/订阅 (Pub/Sub) 模式，用于彻底解耦插件之间的相互依赖调用。
+AxPlug 提供完全整合的进程内与跨节点级别的事件总线 (Event Bus)。它基于发布/订阅 (Pub/Sub) 模式，用于彻底解耦插件之间的相互依赖调用。
 
 **核心特性：**
 * **类型安全**：借助 `constexpr` 和 FNV-1a Hash 编译期生成 O(1) 匹配的 `EventID`。

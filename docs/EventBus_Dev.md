@@ -1,4 +1,4 @@
-# AxPlug 事件总线 (Event Bus) · 高级开发手册 v1.0
+# AxPlug 事件总线 (Event Bus) · 高级开发手册
 
 本文档面向需要在 AxPlug 框架中开发高级定制化事件（包含能够跨网络节点的分布式事件），以及理解事件总线如何与现有架构集成的开发者。
 
@@ -81,7 +81,7 @@ void MySysPlugin::OnInit() {
 
 ## 3. 架构解析：插件化事件总线的 "夺舍"
 
-AxPlug 首个版本的一个精妙架构是将核心与插件界限彻底打通的 **"夺舍" (Takeover)** 机制。
+AxPlug 的一个核心架构是将核心与插件界限彻底打通的 **"夺舍" (Takeover)** 机制。
 
 * AxCore 核心库在系统启动时，硬编码提供了一个 `DefaultEventBus`，这是一个纯本地的无锁进程内路由总线。`Ax_GetEventBus()` 返回的就是它。
 * 如果你编写并加载了 `NetworkEventBusPlugin`（该类实现了 `INetworkEventBus` 且内部包装了基于 Boost.Asio 的组播服务）。并且在这个网络插件初始化的时候调用 `Ax_SetEventBus(this->AsEventBus())`，它就会替换掉框架原本的通信线缆头。

@@ -1,12 +1,15 @@
 #include "AxPluginManager.h"
+#include "AxPluginManagerImpl.h"
 #include "DefaultEventBus.h"
 #include "AxPlug/AxProfiler.h"
 #include "AxPlug/AxPluginExport.h"
+#include "AxPlug/AxException.h"
 #include "AxPlug/OSUtils.hpp"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <shared_mutex>
 
 
 namespace fs = std::filesystem;
@@ -18,13 +21,14 @@ namespace fs = std::filesystem;
 // ============================================================
 
 AxPluginManager::AxPluginManager()
+    : pimpl_(std::make_unique<AxPluginManagerImpl>())
 {
-    defaultEventBus_ = std::make_unique<DefaultEventBus>();
+    pimpl_->defaultEventBus_ = std::make_unique<DefaultEventBus>();
 }
 
 AxPluginManager::~AxPluginManager() {
   // Shutdown event bus before releasing singletons
-  if (auto* bus = dynamic_cast<DefaultEventBus*>(defaultEventBus_.get()))
+  if (auto* bus = dynamic_cast<DefaultEventBus*>(pimpl_->defaultEventBus_.get()))
       bus->Shutdown();
 
   ReleaseAllSingletons();
@@ -34,9 +38,9 @@ AxPluginManager::~AxPluginManager() {
   // into DLL code. Calling FreeLibrary would crash their virtual destructors.
   // OS reclaims DLL memory on process exit. For explicit unload, add a
   // Shutdown() API with object-count tracking in a future phase.
-  modules_.clear();
-  registry_.clear();
-  nameToTypeId_.clear();
+  pimpl_->modules_.clear();
+  pimpl_->registry_.clear();
+  pimpl_->nameToTypeId_.clear();
 }
 
 AxPluginManager *AxPluginManager::Instance() {
@@ -75,11 +79,11 @@ void AxPluginManager::LoadPlugins(const char *directory) {
   // Re-entry protection: skip if this directory was already scanned
   std::string normalizedDir = fs::absolute(fs::u8path(directory), ec).u8string();
   {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    for (const auto &d : scannedDirs_) {
+    std::unique_lock<std::shared_mutex> lock(pimpl_->mutex_);
+    for (const auto &d : pimpl_->scannedDirs_) {
       if (d == normalizedDir) return;
     }
-    scannedDirs_.push_back(normalizedDir);
+    pimpl_->scannedDirs_.push_back(normalizedDir);
   }
 
   std::string ext = AxPlug::OSUtils::GetLibraryExtension();
@@ -114,8 +118,8 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
 
   // Fix 2.11: Phase 2 — Check duplicates under shared_lock (read-only)
   {
-    std::shared_lock<std::shared_mutex> rlock(mutex_);
-    for (const auto &mod : modules_) {
+    std::shared_lock<std::shared_mutex> rlock(pimpl_->mutex_);
+    for (const auto &mod : pimpl_->modules_) {
       std::string existingCheck = AxPlug::OSUtils::NormalizePath(mod.filePath);
 #ifdef _WIN32
       std::transform(existingCheck.begin(), existingCheck.end(), existingCheck.begin(), [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
@@ -133,8 +137,8 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
   auto handle = AxPlug::OSUtils::LoadLibrary(finalPath);
   if (!handle) {
     mod.errorMessage = AxPlug::OSUtils::GetLastError();
-    std::unique_lock<std::shared_mutex> wlock(mutex_);
-    modules_.push_back(mod);
+    std::unique_lock<std::shared_mutex> wlock(pimpl_->mutex_);
+    pimpl_->modules_.push_back(mod);
     return;
   }
 
@@ -150,10 +154,10 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
   }
 
   // Fix 2.11: Phase 4 — Register under unique_lock (write path)
-  std::unique_lock<std::shared_mutex> wlock(mutex_);
+  std::unique_lock<std::shared_mutex> wlock(pimpl_->mutex_);
 
   // Re-check duplicates (TOCTOU protection: another thread may have loaded same DLL)
-  for (const auto &existingMod : modules_) {
+  for (const auto &existingMod : pimpl_->modules_) {
     std::string existingCheck = AxPlug::OSUtils::NormalizePath(existingMod.filePath);
 #ifdef _WIN32
     std::transform(existingCheck.begin(), existingCheck.end(), existingCheck.begin(), [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; });
@@ -177,25 +181,25 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
     }
     
     std::string implName = (info.implName && info.implName[0] != '\0') ? info.implName : "";
-    int flatIndex = static_cast<int>(allPlugins_.size());
+    int flatIndex = static_cast<int>(pimpl_->allPlugins_.size());
     // Named impl registry: (typeId, implName) -> flatIndex
     auto namedKey = std::make_pair(info.typeId, implName);
-    auto [nit, nInserted] = namedImplRegistry_.insert({namedKey, flatIndex});
+    auto [nit, nInserted] = pimpl_->namedImplRegistry_.insert({namedKey, flatIndex});
     if (!nInserted) {
       // Duplicate (typeId, implName) pair — skip
       return;
     }
-    allPlugins_.push_back({moduleIndex, pluginIndex});
+    pimpl_->allPlugins_.push_back({moduleIndex, pluginIndex});
     // Default registry: first registered impl for a typeId becomes the default
-    registry_.insert({info.typeId, flatIndex});
-    nameToTypeId_[info.interfaceName] = info.typeId;
+    pimpl_->registry_.insert({info.typeId, flatIndex});
+    pimpl_->nameToTypeId_[info.interfaceName] = info.typeId;
   };
 
   if (!plugins || pluginCount <= 0) {
     mod.errorMessage = "Missing GetAxPlugins entry point";
     AxPlug::OSUtils::UnloadLibrary(handle);
     mod.handle = AxPlug::LibraryHandle();
-    modules_.push_back(std::move(mod));
+    pimpl_->modules_.push_back(std::move(mod));
     return;
   }
 
@@ -204,17 +208,17 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
   }
   mod.isLoaded = true;
   mod.errorMessage = "OK";
-  int moduleIndex = static_cast<int>(modules_.size());
+  int moduleIndex = static_cast<int>(pimpl_->modules_.size());
   for (int i = 0; i < pluginCount; i++) {
     registerPlugin(mod.plugins[i], moduleIndex, i);
   }
-  modules_.push_back(std::move(mod));
+  pimpl_->modules_.push_back(std::move(mod));
 
   // Publish PluginLoaded events for each plugin in this module (under lock)
   // Use a deferred approach: collect events, publish after lock release
   struct PendingEvent { std::string name; };
   std::vector<PendingEvent> pendingEvents;
-  const auto& loadedMod = modules_.back();
+  const auto& loadedMod = pimpl_->modules_.back();
   if (loadedMod.isLoaded) {
     for (const auto& p : loadedMod.plugins) {
       if (p.interfaceName) pendingEvents.push_back({ p.interfaceName });
@@ -235,15 +239,15 @@ void AxPluginManager::LoadOnePlugin(const std::string &path) {
 
 // Internal: create object by typeId (caller must hold at least shared_lock)
 IAxObject *AxPluginManager::CreateObjectByIdInternal(uint64_t typeId) {
-  auto it = registry_.find(typeId);
-  if (it == registry_.end()) {
+  auto it = pimpl_->registry_.find(typeId);
+  if (it == pimpl_->registry_.end()) {
     AxErrorState::Set(AxErrorCode::PluginNotFound,
                       "No plugin found for the given typeId", "CreateObject");
     return nullptr;
   }
 
-  const auto &entry = allPlugins_[it->second];
-  const auto &mod = modules_[entry.moduleIndex];
+  const auto &entry = pimpl_->allPlugins_[it->second];
+  const auto &mod = pimpl_->modules_[entry.moduleIndex];
   if (!mod.isLoaded) {
     AxErrorState::Set(AxErrorCode::PluginNotLoaded,
                       "Plugin module is not loaded", "CreateObject");
@@ -270,11 +274,11 @@ IAxObject *AxPluginManager::CreateObject(const char *interfaceName) {
           return nullptr;
         }
 
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
 
         // Resolve string name to typeId
-        auto nameIt = nameToTypeId_.find(interfaceName);
-        if (nameIt == nameToTypeId_.end()) {
+        auto nameIt = pimpl_->nameToTypeId_.find(interfaceName);
+        if (nameIt == pimpl_->nameToTypeId_.end()) {
           AxErrorState::Set(
               AxErrorCode::PluginNotFound,
               (std::string("No plugin found for interface: ") + interfaceName)
@@ -292,7 +296,7 @@ IAxObject *AxPluginManager::CreateObjectById(uint64_t typeId) {
   AX_PROFILE_FUNCTION();
   return AxExceptionGuard::SafeCallPtr(
       [&]() -> IAxObject * {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
         return CreateObjectByIdInternal(typeId);
       },
       "Ax_CreateObjectById");
@@ -302,19 +306,19 @@ IAxObject *AxPluginManager::CreateObjectByIdNamed(uint64_t typeId, const char *i
   AX_PROFILE_FUNCTION();
   return AxExceptionGuard::SafeCallPtr(
       [&]() -> IAxObject * {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
         std::string name = (implName && implName[0] != '\0') ? implName : "";
         if (name.empty()) {
           return CreateObjectByIdInternal(typeId);
         }
         auto key = std::make_pair(typeId, name);
-        auto it = namedImplRegistry_.find(key);
-        if (it == namedImplRegistry_.end()) {
+        auto it = pimpl_->namedImplRegistry_.find(key);
+        if (it == pimpl_->namedImplRegistry_.end()) {
           AxErrorState::Set(AxErrorCode::PluginNotFound, (std::string("No named implementation '" + name + "' found for the given typeId")).c_str(), "CreateObjectByIdNamed");
           return nullptr;
         }
-        const auto &entry = allPlugins_[it->second];
-        const auto &mod = modules_[entry.moduleIndex];
+        const auto &entry = pimpl_->allPlugins_[it->second];
+        const auto &mod = pimpl_->modules_[entry.moduleIndex];
         if (!mod.isLoaded) {
           AxErrorState::Set(AxErrorCode::PluginNotLoaded, "Plugin module is not loaded", "CreateObjectByIdNamed");
           return nullptr;
@@ -343,9 +347,9 @@ IAxObject *AxPluginManager::GetSingleton(const char *interfaceName,
         // Resolve string to typeId
         uint64_t typeId;
         {
-          std::shared_lock<std::shared_mutex> lock(mutex_);
-          auto nameIt = nameToTypeId_.find(interfaceName);
-          if (nameIt == nameToTypeId_.end()) {
+          std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+          auto nameIt = pimpl_->nameToTypeId_.find(interfaceName);
+          if (nameIt == pimpl_->nameToTypeId_.end()) {
             AxErrorState::Set(
                 AxErrorCode::PluginNotFound,
                 (std::string("No plugin found for interface: ") + interfaceName)
@@ -366,7 +370,7 @@ IAxObject *AxPluginManager::GetSingletonById(uint64_t typeId,
   AX_PROFILE_FUNCTION();
   return AxExceptionGuard::SafeCallPtr(
       [&]() -> IAxObject * {
-        if (isShuttingDown_.load(std::memory_order_acquire)) {
+        if (pimpl_->isShuttingDown_.load(std::memory_order_acquire)) {
           AxErrorState::Set(AxErrorCode::FactoryFailed, "Plugin manager is shutting down", "GetSingletonById");
           return nullptr;
         }
@@ -377,26 +381,26 @@ IAxObject *AxPluginManager::GetSingletonById(uint64_t typeId,
         // Risk 1: Copy shared_ptr<SingletonHolder> under lock — holder survives map erasure
         std::shared_ptr<SingletonHolder> holder;
         {
-          std::shared_lock<std::shared_mutex> lock(mutex_);
+          std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
           if (isDefault) {
-            auto it = defaultSingletonHolders_.find(typeId);
-            if (it != defaultSingletonHolders_.end()) holder = it->second;
+            auto it = pimpl_->defaultSingletonHolders_.find(typeId);
+            if (it != pimpl_->defaultSingletonHolders_.end()) holder = it->second;
           } else {
             auto key = std::make_pair(typeId, name);
-            auto it = namedSingletonHolders_.find(key);
-            if (it != namedSingletonHolders_.end()) holder = it->second;
+            auto it = pimpl_->namedSingletonHolders_.find(key);
+            if (it != pimpl_->namedSingletonHolders_.end()) holder = it->second;
           }
         }
 
         if (!holder) {
-          std::unique_lock<std::shared_mutex> lock(mutex_);
+          std::unique_lock<std::shared_mutex> lock(pimpl_->mutex_);
           if (isDefault) {
-            auto& slot = defaultSingletonHolders_[typeId];
+            auto& slot = pimpl_->defaultSingletonHolders_[typeId];
             if (!slot) slot = std::make_shared<SingletonHolder>();
             holder = slot;
           } else {
             auto key = std::make_pair(typeId, name);
-            auto& slot = namedSingletonHolders_[key];
+            auto& slot = pimpl_->namedSingletonHolders_[key];
             if (!slot) slot = std::make_shared<SingletonHolder>();
             holder = slot;
           }
@@ -407,21 +411,21 @@ IAxObject *AxPluginManager::GetSingletonById(uint64_t typeId,
           try {
             IAxObject* raw = nullptr;
             {
-              std::shared_lock<std::shared_mutex> create_lock(mutex_);
+              std::shared_lock<std::shared_mutex> create_lock(pimpl_->mutex_);
               raw = CreateObjectByIdInternal(typeId);
             }
             if (!raw) throw std::runtime_error("Factory returned nullptr");
             holder->instance = std::shared_ptr<IAxObject>(raw, [](IAxObject* p) { if (p) p->Destroy(); });
             {
-              std::unique_lock<std::shared_mutex> stack_lock(mutex_);
-              shutdownStack_.push_back(holder->instance);
+              std::unique_lock<std::shared_mutex> stack_lock(pimpl_->mutex_);
+              pimpl_->shutdownStack_.push_back(holder->instance);
             }
             holder->instance->OnInit();
           } catch (...) {
             if (holder->instance) {
               auto zombie = holder->instance;
-              std::unique_lock<std::shared_mutex> stack_lock(mutex_);
-              shutdownStack_.erase(std::remove_if(shutdownStack_.begin(), shutdownStack_.end(), [&zombie](const std::shared_ptr<IAxObject>& ptr) { return ptr == zombie; }), shutdownStack_.end());
+              std::unique_lock<std::shared_mutex> stack_lock(pimpl_->mutex_);
+              pimpl_->shutdownStack_.erase(std::remove_if(pimpl_->shutdownStack_.begin(), pimpl_->shutdownStack_.end(), [&zombie](const std::shared_ptr<IAxObject>& ptr) { return ptr == zombie; }), pimpl_->shutdownStack_.end());
             }
             holder->e_ptr = std::current_exception();
             holder->instance.reset();
@@ -444,15 +448,15 @@ IAxObject *AxPluginManager::AcquireSingletonById(uint64_t typeId, const char *se
         std::string name = serviceName ? serviceName : "";
         bool isDefault = name.empty();
 
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
         std::shared_ptr<SingletonHolder> holder;
         if (isDefault) {
-          auto it = defaultSingletonHolders_.find(typeId);
-          if (it != defaultSingletonHolders_.end()) holder = it->second;
+          auto it = pimpl_->defaultSingletonHolders_.find(typeId);
+          if (it != pimpl_->defaultSingletonHolders_.end()) holder = it->second;
         } else {
           auto key = std::make_pair(typeId, name);
-          auto it = namedSingletonHolders_.find(key);
-          if (it != namedSingletonHolders_.end()) holder = it->second;
+          auto it = pimpl_->namedSingletonHolders_.find(key);
+          if (it != pimpl_->namedSingletonHolders_.end()) holder = it->second;
         }
         if (holder) holder->externalRefs.fetch_add(1, std::memory_order_relaxed);
         return ptr;
@@ -469,14 +473,14 @@ void AxPluginManager::ReleaseSingletonRef(uint64_t typeId, const char *serviceNa
 
         std::shared_ptr<SingletonHolder> holder;
         {
-          std::shared_lock<std::shared_mutex> lock(mutex_);
+          std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
           if (isDefault) {
-            auto it = defaultSingletonHolders_.find(typeId);
-            if (it != defaultSingletonHolders_.end()) holder = it->second;
+            auto it = pimpl_->defaultSingletonHolders_.find(typeId);
+            if (it != pimpl_->defaultSingletonHolders_.end()) holder = it->second;
           } else {
             auto key = std::make_pair(typeId, name);
-            auto it = namedSingletonHolders_.find(key);
-            if (it != namedSingletonHolders_.end()) holder = it->second;
+            auto it = pimpl_->namedSingletonHolders_.find(key);
+            if (it != pimpl_->namedSingletonHolders_.end()) holder = it->second;
           }
         }
         if (!holder) return;
@@ -500,9 +504,9 @@ void AxPluginManager::ReleaseSingleton(const char *interfaceName,
 
         uint64_t typeId;
         {
-          std::shared_lock<std::shared_mutex> lock(mutex_);
-          auto nameIt = nameToTypeId_.find(interfaceName);
-          if (nameIt == nameToTypeId_.end())
+          std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+          auto nameIt = pimpl_->nameToTypeId_.find(interfaceName);
+          if (nameIt == pimpl_->nameToTypeId_.end())
             return;
           typeId = nameIt->second;
         }
@@ -519,23 +523,23 @@ void AxPluginManager::ReleaseSingletonById(uint64_t typeId,
       [&]() {
         std::shared_ptr<IAxObject> instanceToRelease;
         {
-          std::unique_lock<std::shared_mutex> lock(mutex_);
+          std::unique_lock<std::shared_mutex> lock(pimpl_->mutex_);
           std::string name = serviceName ? serviceName : "";
 
           std::shared_ptr<SingletonHolder> holder;
           if (name.empty()) {
-            auto it = defaultSingletonHolders_.find(typeId);
-            if (it != defaultSingletonHolders_.end()) holder = it->second;
+            auto it = pimpl_->defaultSingletonHolders_.find(typeId);
+            if (it != pimpl_->defaultSingletonHolders_.end()) holder = it->second;
           } else {
             auto key = std::make_pair(typeId, name);
-            auto it = namedSingletonHolders_.find(key);
-            if (it != namedSingletonHolders_.end()) holder = it->second;
+            auto it = pimpl_->namedSingletonHolders_.find(key);
+            if (it != pimpl_->namedSingletonHolders_.end()) holder = it->second;
           }
 
           if (!holder || !holder->instance) {
             // Nothing to release, still erase the map entry
-            if (name.empty()) defaultSingletonHolders_.erase(typeId);
-            else namedSingletonHolders_.erase(std::make_pair(typeId, name));
+            if (name.empty()) pimpl_->defaultSingletonHolders_.erase(typeId);
+            else pimpl_->namedSingletonHolders_.erase(std::make_pair(typeId, name));
             return;
           }
 
@@ -547,11 +551,11 @@ void AxPluginManager::ReleaseSingletonById(uint64_t typeId,
 
           // No external refs — proceed with immediate destruction
           instanceToRelease = holder->instance;
-          for (auto sit = shutdownStack_.begin(); sit != shutdownStack_.end(); ++sit) {
-            if (*sit == instanceToRelease) { shutdownStack_.erase(sit); break; }
+          for (auto sit = pimpl_->shutdownStack_.begin(); sit != pimpl_->shutdownStack_.end(); ++sit) {
+            if (*sit == instanceToRelease) { pimpl_->shutdownStack_.erase(sit); break; }
           }
-          if (name.empty()) defaultSingletonHolders_.erase(typeId);
-          else namedSingletonHolders_.erase(std::make_pair(typeId, name));
+          if (name.empty()) pimpl_->defaultSingletonHolders_.erase(typeId);
+          else pimpl_->namedSingletonHolders_.erase(std::make_pair(typeId, name));
         }
         if (instanceToRelease) {
           instanceToRelease->OnShutdown();
@@ -567,51 +571,51 @@ void AxPluginManager::ReleaseObject(IAxObject *obj) {
 }
 
 int AxPluginManager::GetPluginCount() const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  return static_cast<int>(allPlugins_.size());
+  std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+  return static_cast<int>(pimpl_->allPlugins_.size());
 }
 
 const char *AxPluginManager::GetPluginInterfaceName(int index) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  if (index < 0 || index >= static_cast<int>(allPlugins_.size()))
+  std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+  if (index < 0 || index >= static_cast<int>(pimpl_->allPlugins_.size()))
     return nullptr;
-  const auto &entry = allPlugins_[index];
-  return modules_[entry.moduleIndex].plugins[entry.pluginIndex].interfaceName;
+  const auto &entry = pimpl_->allPlugins_[index];
+  return pimpl_->modules_[entry.moduleIndex].plugins[entry.pluginIndex].interfaceName;
 }
 
 const char *AxPluginManager::GetPluginFileName(int index) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  if (index < 0 || index >= static_cast<int>(allPlugins_.size()))
+  std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+  if (index < 0 || index >= static_cast<int>(pimpl_->allPlugins_.size()))
     return nullptr;
   // Fix 2: deque guarantees element address stability, safe to return c_str() directly
-  return modules_[allPlugins_[index].moduleIndex].fileName.c_str();
+  return pimpl_->modules_[pimpl_->allPlugins_[index].moduleIndex].fileName.c_str();
 }
 
 int AxPluginManager::GetPluginType(int index) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  if (index < 0 || index >= static_cast<int>(allPlugins_.size()))
+  std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+  if (index < 0 || index >= static_cast<int>(pimpl_->allPlugins_.size()))
     return -1;
-  const auto &entry = allPlugins_[index];
+  const auto &entry = pimpl_->allPlugins_[index];
   return static_cast<int>(
-      modules_[entry.moduleIndex].plugins[entry.pluginIndex].type);
+      pimpl_->modules_[entry.moduleIndex].plugins[entry.pluginIndex].type);
 }
 
 bool AxPluginManager::IsPluginLoaded(int index) const {
-  std::shared_lock<std::shared_mutex> lock(mutex_);
-  if (index < 0 || index >= static_cast<int>(allPlugins_.size()))
+  std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
+  if (index < 0 || index >= static_cast<int>(pimpl_->allPlugins_.size()))
     return false;
-  return modules_[allPlugins_[index].moduleIndex].isLoaded;
+  return pimpl_->modules_[pimpl_->allPlugins_[index].moduleIndex].isLoaded;
 }
 
 int AxPluginManager::FindPluginsByTypeId(uint64_t typeId, int* outIndices, int maxCount) {
   if (!outIndices || maxCount <= 0) return 0;
   
-  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(pimpl_->mutex_);
   int found = 0;
   
-  for (int i = 0; i < static_cast<int>(allPlugins_.size()) && found < maxCount; ++i) {
-    const auto& entry = allPlugins_[i];
-    const auto& mod = modules_[entry.moduleIndex];
+  for (int i = 0; i < static_cast<int>(pimpl_->allPlugins_.size()) && found < maxCount; ++i) {
+    const auto& entry = pimpl_->allPlugins_[i];
+    const auto& mod = pimpl_->modules_[entry.moduleIndex];
     if (entry.pluginIndex < static_cast<int>(mod.plugins.size())) {
       const auto& plugin = mod.plugins[entry.pluginIndex];
       if (plugin.typeId == typeId) {
@@ -625,13 +629,13 @@ int AxPluginManager::FindPluginsByTypeId(uint64_t typeId, int* outIndices, int m
 
 AxPlug::IEventBus* AxPluginManager::GetEventBus()
 {
-    if (externalEventBus_) return externalEventBus_;
-    return defaultEventBus_.get();
+    if (pimpl_->externalEventBus_) return pimpl_->externalEventBus_;
+    return pimpl_->defaultEventBus_.get();
 }
 
 void AxPluginManager::SetEventBus(AxPlug::IEventBus* externalBus)
 {
-    externalEventBus_ = externalBus;
+    pimpl_->externalEventBus_ = externalBus;
 }
 
 void AxPluginManager::ReleaseAllSingletons() {
@@ -642,17 +646,17 @@ void AxPluginManager::ReleaseAllSingletons() {
     bus->Publish(AxPlug::EVENT_SYSTEM_SHUTDOWN, std::move(ev), AxPlug::DispatchMode::DirectCall);
   }
 
-  isShuttingDown_.store(true, std::memory_order_release);
+  pimpl_->isShuttingDown_.store(true, std::memory_order_release);
   extern void Ax_Internal_SetShuttingDown();
   Ax_Internal_SetShuttingDown();
 
   std::vector<std::shared_ptr<IAxObject>> stackCopy;
   {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    stackCopy = shutdownStack_;
-    shutdownStack_.clear();
-    defaultSingletonHolders_.clear();
-    namedSingletonHolders_.clear();
+    std::unique_lock<std::shared_mutex> lock(pimpl_->mutex_);
+    stackCopy = pimpl_->shutdownStack_;
+    pimpl_->shutdownStack_.clear();
+    pimpl_->defaultSingletonHolders_.clear();
+    pimpl_->namedSingletonHolders_.clear();
   }
 
   for (auto it = stackCopy.rbegin(); it != stackCopy.rend(); ++it) {

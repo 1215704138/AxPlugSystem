@@ -34,6 +34,7 @@ public:
 
     void Publish(uint64_t eventId, std::shared_ptr<AxPlug::AxEvent> payload, AxPlug::DispatchMode mode = AxPlug::DispatchMode::DirectCall) override;
     AxPlug::EventConnectionPtr Subscribe(uint64_t eventId, AxPlug::EventCallback callback, void* specificSender = nullptr) override;
+    void SetExceptionHandler(AxPlug::ExceptionHandler handler) override;
 
 private:
     NetworkEventBusImpl* owner_;

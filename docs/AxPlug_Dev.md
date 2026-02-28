@@ -1,6 +1,6 @@
-# AxPlug 插件框架 · 开发与维护手册 v1.0 (首个发布版本)
+# AxPlug 插件框架 · 开发与维护手册
 
-本文档面向框架本身的开发者和维护者，描述 AxPlug v1.0（首个对外发布版本）的内部架构、源码结构、构建系统和扩展方法。
+本文档面向框架本身的开发者和维护者，描述 AxPlug 插件框架的内部架构、源码结构、构建系统和扩展方法。
 
 ---
 
@@ -257,7 +257,7 @@ AxPlug::Init(dir)
 
 ## 5. 对象生命周期管理
 
-### 5.1 Tool（智能指针模式，v3 推荐）
+### 5.1 Tool（智能指针模式，推荐）
 
 ```
 CreateTool<T>()
@@ -271,7 +271,7 @@ CreateTool<T>()
 // 显式释放：AxPlug::DestroyTool(axptr) → ptr.reset() → 触发 deleter
 ```
 
-### 5.2 Tool（原始指针模式，向后兼容）
+### 5.2 Tool（原始指针模式）
 
 ```
 CreateToolRaw<T>()
@@ -473,8 +473,7 @@ auto registerPlugin = [&](const AxPluginInfo& info, int moduleIndex, int pluginI
 查询 API 现在返回**每个插件**的独立索引：
 
 ```cpp
-// 之前：每个模块一个索引
-// 现在：每个插件一个索引
+// 每个插件占用一个独立的索引
 int count = AxPlug::GetPluginCount();  // 6 个插件 = 6 个索引
 for (int i = 0; i < count; i++) {
     auto info = AxPlug::GetPluginInfo(i);
@@ -634,4 +633,4 @@ for (int i = 0; i < AxPlug::GetPluginCount(); i++) {
 
 ---
 
-*AxPlug v1.0 · 开发与维护手册*
+*AxPlug · 开发与维护手册*

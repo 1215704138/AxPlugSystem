@@ -4,6 +4,8 @@
 #include "AxEventBus.h"
 #include "core/INetworkEventBus.h"
 #include "AxPluginExport.h"
+#include "AxAutoRegister.h"
+#include "AxPluginImpl.h"
 #include "AxProfiler.h"
 #include "IAxObject.h"
 #include <cstring>
@@ -332,6 +334,13 @@ inline IEventBus *GetEventBus() { return Ax_GetEventBus(); }
 
 // Replace the default event bus with an external implementation (e.g. NetworkEventBusPlugin)
 inline void SetEventBus(IEventBus *bus) { Ax_SetEventBus(bus); }
+
+// Set a global exception handler for out-of-band exception isolation.
+// Callbacks that throw will be caught and routed to this handler instead of crashing.
+inline void SetExceptionHandler(ExceptionHandler handler) {
+  auto *bus = Ax_GetEventBus();
+  if (bus) bus->SetExceptionHandler(std::move(handler));
+}
 
 // Publish an event with compile-time hash ID
 inline void Publish(uint64_t eventId, std::shared_ptr<AxEvent> payload, DispatchMode mode = DispatchMode::DirectCall) {

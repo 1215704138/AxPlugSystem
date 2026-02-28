@@ -21,6 +21,7 @@ public:
     // IEventBus interface
     void Publish(uint64_t eventId, std::shared_ptr<AxPlug::AxEvent> payload, AxPlug::DispatchMode mode = AxPlug::DispatchMode::DirectCall) override;
     AxPlug::EventConnectionPtr Subscribe(uint64_t eventId, AxPlug::EventCallback callback, void* specificSender = nullptr) override;
+    void SetExceptionHandler(AxPlug::ExceptionHandler handler) override;
 
     // Shutdown the async event loop
     void Shutdown();
@@ -75,4 +76,12 @@ private:
 
     // Phase 3: Callback timeout WARNING threshold (microseconds)
     static constexpr int64_t CALLBACK_WARN_THRESHOLD_US = 16000; // 16ms
+
+    // Out-of-band exception handler (z3y-inspired isolation)
+    std::shared_ptr<AxPlug::ExceptionHandler> exceptionHandler_;
+    std::mutex exceptionHandlerMutex_;
+
+    // Internal: route exception to handler or stderr fallback
+    void ReportException(const std::exception& e);
+    void ReportUnknownException();
 };

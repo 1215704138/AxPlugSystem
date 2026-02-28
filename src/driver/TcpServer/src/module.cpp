@@ -1,9 +1,7 @@
-#include "../../../include/AxPlug/AxPluginExport.h"
 #include "../include/BoostTcpServer.h"
 #include "../include/TcpServer.h"
+#include "AxPlug/AxAutoRegister.h"
 
-
-AX_BEGIN_PLUGIN_MAP()
-AX_PLUGIN_TOOL(TcpServer, ITcpServer)
-AX_PLUGIN_TOOL_NAMED(BoostTcpServer, ITcpServer, "boost")
-AX_END_PLUGIN_MAP()
+AX_AUTO_REGISTER_TOOL(TcpServer, ITcpServer)
+AX_AUTO_REGISTER_TOOL_NAMED(BoostTcpServer, ITcpServer, "boost")
+AX_DEFINE_PLUGIN_ENTRY()

@@ -1,6 +1,6 @@
 #pragma once
 #include "driver/IUdpSocket.h"
-#include "AxPlug/AxPluginExport.h"
+#include "AxPlug/AxPluginImpl.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string>
@@ -8,13 +8,10 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-class UdpSocket : public IUdpSocket {
+class UdpSocket : public AxPluginImpl<UdpSocket, IUdpSocket> {
 public:
     UdpSocket();
     ~UdpSocket();
-
-protected:
-    void Destroy() override { delete this; }
 
 private:
     SOCKET socket_;

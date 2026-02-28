@@ -85,6 +85,13 @@ enum class DispatchMode
 using EventCallback = std::function<void(std::shared_ptr<AxEvent>)>;
 
 // ============================================================
+// ExceptionHandler - out-of-band exception handler callback
+// Set via IEventBus::SetExceptionHandler to catch exceptions thrown
+// by subscriber callbacks without crashing the host process.
+// ============================================================
+using ExceptionHandler = std::function<void(const std::exception&)>;
+
+// ============================================================
 // IEventBus - abstract event bus interface
 // ============================================================
 class IEventBus
@@ -98,6 +105,12 @@ public:
     // Subscribe to an event. Keep the returned EventConnectionPtr alive to stay subscribed.
     // If specificSender != nullptr, only events from that sender trigger callback.
     virtual EventConnectionPtr Subscribe(uint64_t eventId, EventCallback callback, void* specificSender = nullptr) = 0;
+
+    // Set a global exception handler for out-of-band exception isolation.
+    // When a subscriber callback throws, the exception is caught and routed
+    // to this handler instead of crashing the process.
+    // Pass nullptr to clear the handler (exceptions will be logged to stderr).
+    virtual void SetExceptionHandler(ExceptionHandler handler) = 0;
 };
 
 // ============================================================

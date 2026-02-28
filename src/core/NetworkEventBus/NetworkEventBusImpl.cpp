@@ -58,6 +58,11 @@ AxPlug::EventConnectionPtr EventBusProxy::Subscribe(uint64_t eventId, AxPlug::Ev
     return owner_->ProxySubscribe(eventId, std::move(callback), specificSender);
 }
 
+void EventBusProxy::SetExceptionHandler(AxPlug::ExceptionHandler handler)
+{
+    if (owner_->localBus_) owner_->localBus_->SetExceptionHandler(std::move(handler));
+}
+
 // ============================================================
 // NetworkEventBusImpl
 // ============================================================

@@ -1,7 +1,7 @@
 #pragma once
 #include "driver/ITcpServer.h"
 #include "driver/ITcpClient.h"
-#include "AxPlug/AxPluginExport.h"
+#include "AxPlug/AxPluginImpl.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string>
@@ -16,14 +16,11 @@
 class TcpServer;
 
 // TCP客户端实现（用于服务器返回的连接）
-class TcpClientConnection : public ITcpClient {
+class TcpClientConnection : public AxPluginImpl<TcpClientConnection, ITcpClient> {
     friend class TcpServer;
 public:
     TcpClientConnection(SOCKET socket, TcpServer* server);
     ~TcpClientConnection();
-
-protected:
-    void Destroy() override { delete this; }
 
 private:
     SOCKET socket_;
@@ -79,7 +76,7 @@ public:
 };
 
 // TCP服务器实现
-class TcpServer : public ITcpServer {
+class TcpServer : public AxPluginImpl<TcpServer, ITcpServer> {
 private:
     SOCKET listenSocket_;
     mutable std::mutex listenMutex_;  // Fix D: protect listenSocket_ against concurrent Accept/StopListening
@@ -115,9 +112,6 @@ private:
 public:
     TcpServer();
     ~TcpServer();
-
-protected:
-    void Destroy() override { delete this; }
     
     // 实现 ITcpServer 接口
     bool Listen(int port, int backlog = 5) override;

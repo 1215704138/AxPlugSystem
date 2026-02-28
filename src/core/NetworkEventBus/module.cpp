@@ -1,6 +1,5 @@
-#include "AxPlug/AxPluginExport.h"
 #include "NetworkEventBusImpl.h"
+#include "AxPlug/AxAutoRegister.h"
 
-AX_BEGIN_PLUGIN_MAP()
-    AX_PLUGIN_SERVICE(NetworkEventBusImpl, AxPlug::INetworkEventBus)
-AX_END_PLUGIN_MAP()
+AX_AUTO_REGISTER_SERVICE(NetworkEventBusImpl, AxPlug::INetworkEventBus)
+AX_DEFINE_PLUGIN_ENTRY()

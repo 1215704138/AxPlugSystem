@@ -1,9 +1,7 @@
-#include "../../../include/AxPlug/AxPluginExport.h"
 #include "../include/BoostUdpSocket.h"
 #include "../include/UdpSocket.h"
+#include "AxPlug/AxAutoRegister.h"
 
-
-AX_BEGIN_PLUGIN_MAP()
-AX_PLUGIN_TOOL(UdpSocket, IUdpSocket)
-AX_PLUGIN_TOOL_NAMED(BoostUdpSocket, IUdpSocket, "boost")
-AX_END_PLUGIN_MAP()
+AX_AUTO_REGISTER_TOOL(UdpSocket, IUdpSocket)
+AX_AUTO_REGISTER_TOOL_NAMED(BoostUdpSocket, IUdpSocket, "boost")
+AX_DEFINE_PLUGIN_ENTRY()
